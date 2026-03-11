@@ -177,9 +177,6 @@ Notes:
 
 - Entrypoint: main.py
 - Virtual environment: managed by uv in .venv
-- API docs (when server is running):
-  - http://127.0.0.1:8000/docs
-  - http://127.0.0.1:8000/redoc
 
 Run tests:
 
