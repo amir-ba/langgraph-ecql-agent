@@ -1,0 +1,22 @@
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [
+        {
+          "text": "Your prompt here"
+        }
+      ]
+    }
+  ],
+  "generationConfig": {
+    "thinkingConfig": {
+      "thinkingLevel": "HIGH"
+    }
+  },
+  "tools": [
+    {
+      "googleSearch": {}
+    }
+  ]
+}
