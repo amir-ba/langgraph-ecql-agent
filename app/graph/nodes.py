@@ -80,6 +80,8 @@ def _normalize_geojson_payload(value: Any) -> dict[str, Any] | None:
 async def unified_router_analyzer_node(state: AgentState) -> dict[str, Any]:
     user_query = state.get("user_query", "")
     logger.debug("[unified_router_analyzer_node] input user_query=%s", user_query)
+    settings = get_settings()
+    routing_model = settings.routing_model.strip() or settings.current_model
     messages = [
         {
             "role": "system",
@@ -98,7 +100,12 @@ async def unified_router_analyzer_node(state: AgentState) -> dict[str, Any]:
 
     result = cast(
         AnalyzedIntent,
-        await ainvoke_llm(messages=messages, output_schema=AnalyzedIntent, agent_state=state),
+        await ainvoke_llm(
+            messages=messages,
+            output_schema=AnalyzedIntent,
+            agent_state=state,
+            model_name=routing_model,
+        ),
     )
     final_payload: FinalResponsePayload | None = None
     if result.intent == "irrelevant":
@@ -351,7 +358,12 @@ async def layer_discoverer_node(state: AgentState) -> dict[str, Any]:
 
     result = cast(
         LayerSelection,
-        await ainvoke_llm(messages=messages, response_format=LayerSelection, agent_state=state),
+        await ainvoke_llm(
+            messages=messages,
+            response_format=LayerSelection,
+            agent_state=state,
+            enable_prompt_cache=True,
+        ),
     )
 
     valid_layer_names = {
@@ -649,7 +661,9 @@ async def synthesizer_node(state: AgentState) -> dict[str, FinalResponsePayload]
         },
     ]
 
-    summary = await ainvoke_llm(messages=messages, agent_state=state)
+    settings = get_settings()
+    synthesizer_model = settings.synthesizer_model.strip() or settings.current_model
+    summary = await ainvoke_llm(messages=messages, agent_state=state, model_name=synthesizer_model)
     # Log aggregate usage before final response
     logger.debug("[synthesizer_node] aggregate_usage=%s", json.dumps(state.get("aggregate_usage", {})))
     output = {

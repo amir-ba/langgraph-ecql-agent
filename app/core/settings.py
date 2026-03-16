@@ -4,7 +4,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    current_model: str = "gpt-4o"
+    current_model: str = "gpt-4.1"
+    routing_model: str = "gpt-4o-mini"
+    synthesizer_model: str = "gpt-4o-mini"
     llm_base_url: str = ""
     llm_api_key: str = ""
     openai_api_key: str = ""
@@ -23,6 +25,10 @@ class Settings(BaseSettings):
     geocoder_client_id: str = ""
     geocoder_client_secret: str = ""
     geocoder_scope: str = ""
+
+    llm_prompt_cache_enabled: bool = False
+    llm_prompt_cache_ttl_seconds: int = 3600
+    llm_prompt_cache_max_entries: int = 512
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

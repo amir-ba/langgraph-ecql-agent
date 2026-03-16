@@ -1,5 +1,9 @@
-from typing import Any
+from collections import OrderedDict
+import hashlib
+import json
 import logging
+import time
+from typing import Any
 
 from litellm import acompletion, completion
 from pydantic import BaseModel
@@ -8,6 +12,48 @@ from app.core.settings import get_settings
 
 
 logger = logging.getLogger(__name__)
+
+
+_PROMPT_CACHE: "OrderedDict[str, tuple[float, Any]]" = OrderedDict()
+
+
+def _make_prompt_cache_key(
+    *,
+    messages: list[dict[str, str]],
+    model_name: str,
+    base_url: str,
+    response_format: type[BaseModel] | None,
+) -> str:
+    payload = {
+        "model": model_name,
+        "base_url": base_url,
+        "response_format": response_format.__name__ if response_format is not None else None,
+        "messages": messages,
+    }
+    raw = json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _cache_get(key: str) -> Any | None:
+    now = time.time()
+    entry = _PROMPT_CACHE.get(key)
+    if entry is None:
+        return None
+    expires_at, value = entry
+    if expires_at < now:
+        _PROMPT_CACHE.pop(key, None)
+        return None
+    _PROMPT_CACHE.move_to_end(key)
+    return value
+
+
+def _cache_set(key: str, value: Any, ttl_seconds: int, max_entries: int) -> None:
+    now = time.time()
+    expires_at = now + max(1, ttl_seconds)
+    _PROMPT_CACHE[key] = (expires_at, value)
+    _PROMPT_CACHE.move_to_end(key)
+    while len(_PROMPT_CACHE) > max(1, max_entries):
+        _PROMPT_CACHE.popitem(last=False)
 
 
 def _normalize_model_name(model: str) -> str:
@@ -58,6 +104,8 @@ def invoke_llm(
     messages: list[dict[str, str]],
     response_format: type[BaseModel] | None = None,
     output_schema: type[BaseModel] | None = None,
+    model_name: str | None = None,
+    enable_prompt_cache: bool = False,
 ) -> str | BaseModel:
     if output_schema is not None:
         if response_format is not None and response_format is not output_schema:
@@ -65,7 +113,8 @@ def invoke_llm(
         response_format = output_schema
 
     settings = get_settings()
-    model_name = _normalize_model_name(settings.current_model)
+    selected_model = model_name or settings.current_model
+    model_name = _normalize_model_name(selected_model)
     llm_base_url = settings.llm_base_url.strip()
     logger.debug(
         "[invoke_llm] input model=%s base_url_set=%s message_count=%s response_format=%s",
@@ -75,6 +124,19 @@ def invoke_llm(
         response_format.__name__ if response_format is not None else None,
     )
     logger.debug("[invoke_llm] messages=%s", messages)
+
+    cache_key: str | None = None
+    if settings.llm_prompt_cache_enabled and enable_prompt_cache:
+        cache_key = _make_prompt_cache_key(
+            messages=messages,
+            model_name=model_name,
+            base_url=llm_base_url,
+            response_format=response_format,
+        )
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            logger.debug("[invoke_llm] prompt cache hit key=%s", cache_key)
+            return cached
 
     kwargs: dict[str, Any] = {
         "model": model_name,
@@ -99,15 +161,36 @@ def invoke_llm(
     if response_format is None:
         output = str(content)
         logger.debug("[invoke_llm] output(raw)=%s", output)
+        if cache_key is not None:
+            _cache_set(
+                cache_key,
+                output,
+                settings.llm_prompt_cache_ttl_seconds,
+                settings.llm_prompt_cache_max_entries,
+            )
         return output
 
     if isinstance(content, str):
         output = response_format.model_validate_json(content)
         logger.debug("[invoke_llm] output(parsed-json)=%s", output.model_dump())
+        if cache_key is not None:
+            _cache_set(
+                cache_key,
+                output,
+                settings.llm_prompt_cache_ttl_seconds,
+                settings.llm_prompt_cache_max_entries,
+            )
         return output
 
     output = response_format.model_validate(content)
     logger.debug("[invoke_llm] output(parsed-object)=%s", output.model_dump())
+    if cache_key is not None:
+        _cache_set(
+            cache_key,
+            output,
+            settings.llm_prompt_cache_ttl_seconds,
+            settings.llm_prompt_cache_max_entries,
+        )
     return output
 
 
@@ -116,6 +199,8 @@ async def ainvoke_llm(
     response_format: type[BaseModel] | None = None,
     output_schema: type[BaseModel] | None = None,
     agent_state: dict | None = None,
+    model_name: str | None = None,
+    enable_prompt_cache: bool = False,
 ) -> str | BaseModel:
     if output_schema is not None:
         if response_format is not None and response_format is not output_schema:
@@ -123,7 +208,8 @@ async def ainvoke_llm(
         response_format = output_schema
 
     settings = get_settings()
-    model_name = _normalize_model_name(settings.current_model)
+    selected_model = model_name or settings.current_model
+    model_name = _normalize_model_name(selected_model)
     llm_base_url = settings.llm_base_url.strip()
     logger.debug(
         "[ainvoke_llm] input model=%s base_url_set=%s message_count=%s response_format=%s",
@@ -133,6 +219,19 @@ async def ainvoke_llm(
         response_format.__name__ if response_format is not None else None,
     )
     logger.debug("[ainvoke_llm] messages=%s", messages)
+
+    cache_key: str | None = None
+    if settings.llm_prompt_cache_enabled and enable_prompt_cache:
+        cache_key = _make_prompt_cache_key(
+            messages=messages,
+            model_name=model_name,
+            base_url=llm_base_url,
+            response_format=response_format,
+        )
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            logger.debug("[ainvoke_llm] prompt cache hit key=%s", cache_key)
+            return cached
 
     kwargs: dict[str, Any] = {
         "model": model_name,
@@ -172,13 +271,34 @@ async def ainvoke_llm(
     if response_format is None:
         output = str(content)
         logger.debug("[ainvoke_llm] output(raw)=%s", output)
+        if cache_key is not None:
+            _cache_set(
+                cache_key,
+                output,
+                settings.llm_prompt_cache_ttl_seconds,
+                settings.llm_prompt_cache_max_entries,
+            )
         return output
 
     if isinstance(content, str):
         output = response_format.model_validate_json(content)
         logger.debug("[ainvoke_llm] output(parsed-json)=%s", output.model_dump())
+        if cache_key is not None:
+            _cache_set(
+                cache_key,
+                output,
+                settings.llm_prompt_cache_ttl_seconds,
+                settings.llm_prompt_cache_max_entries,
+            )
         return output
 
     output = response_format.model_validate(content)
     logger.debug("[ainvoke_llm] output(parsed-object)=%s", output.model_dump())
+    if cache_key is not None:
+        _cache_set(
+            cache_key,
+            output,
+            settings.llm_prompt_cache_ttl_seconds,
+            settings.llm_prompt_cache_max_entries,
+        )
     return output

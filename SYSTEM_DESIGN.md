@@ -183,3 +183,19 @@ Key environment-driven settings:
     - multi-layer orchestration
     - richer alias curation and domain ontologies
     - explicit user-guided disambiguation loop for close matches
+ 
+multiple spatial filter
+geospatial query bigger than bigest
+multi layer
+- select layer as part of query
+- improve retreival accuracy
+
+
+
+
+
+use case:
+genral one-shot query
+
+- layer specific queries 
+- interactive queries 

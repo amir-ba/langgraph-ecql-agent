@@ -45,7 +45,14 @@ def test_unified_router_analyzer_node_returns_spatial_entities(monkeypatch) -> N
         attribute_hints=["capacity > 100"],
     )
 
-    async def fake_ainvoke_llm(*, messages, output_schema=None, response_format=None, agent_state=None):
+    async def fake_ainvoke_llm(
+        *,
+        messages,
+        output_schema=None,
+        response_format=None,
+        agent_state=None,
+        model_name=None,
+    ):
         assert "geospatial AI assistant" in messages[0]["content"]
         assert output_schema is AnalyzedIntent
         assert response_format is None
@@ -81,7 +88,14 @@ def test_unified_router_analyzer_node_returns_irrelevant_response(monkeypatch) -
         attribute_hints=None,
     )
 
-    async def fake_ainvoke_llm(*, messages, output_schema=None, response_format=None, agent_state=None):
+    async def fake_ainvoke_llm(
+        *,
+        messages,
+        output_schema=None,
+        response_format=None,
+        agent_state=None,
+        model_name=None,
+    ):
         assert output_schema is AnalyzedIntent
         assert response_format is None
         return parsed_intent
@@ -130,7 +144,7 @@ def test_layer_discoverer_node_selects_layer(monkeypatch) -> None:
         layer_name = "topp:states"
         confidence = "high"
 
-    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None):
+    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None, model_name=None):
         assert "Layer catalog markdown" in messages[1]["content"]
         assert response_format.__name__ == "LayerSelection"
         return _Layer()
@@ -157,7 +171,7 @@ def test_layer_discoverer_node_uses_layer_subject_primary_single_match(monkeypat
         layer_name = "city:hospitals"
         confidence = "high"
 
-    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None):
+    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None, model_name=None):
         assert "Layer subject:\nhospitals" in messages[1]["content"]
         return _Layer()
 
@@ -184,7 +198,7 @@ def test_layer_discoverer_node_uses_filtered_candidates_for_llm_tiebreak(monkeyp
         layer_name = "city:hospitals_general"
         confidence = "high"
 
-    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None):
+    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None, model_name=None):
         prompt = messages[1]["content"]
         assert "city:hospitals_general" in prompt
         assert "city:hospitals_specialized" in prompt
@@ -232,7 +246,7 @@ def test_layer_discoverer_node_falls_back_to_full_list_when_subject_has_no_match
         layer_name = "city:roads"
         confidence = "high"
 
-    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None):
+    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None, model_name=None):
         prompt = messages[1]["content"]
         assert "Layer subject:\nschools" in prompt
         assert "city:hospitals" in prompt
@@ -358,7 +372,7 @@ def test_ecql_generator_node_increments_retry_and_returns_ecql(monkeypatch) -> N
 
 
 def test_synthesizer_node_returns_llm_summary(monkeypatch) -> None:
-    async def fake_ainvoke_llm(*, messages, response_format=None, agent_state=None):
+    async def fake_ainvoke_llm(*, messages, response_format=None, agent_state=None, model_name=None):
         assert response_format is None
         assert "Feature count" in messages[1]["content"]
         return "Found 2 matching features in the requested area."

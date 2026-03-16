@@ -13,7 +13,7 @@ The architecture is intentionally deterministic for critical steps:
 - LangGraph orchestration (node-based workflow)
 - Pydantic-based structured outputs and validation
 - Geospatial stack with OWSLib, Shapely, and pyproj
-- Environment-based model switching through CURRENT_MODEL
+- Environment-based model switching through CURRENT_MODEL, ROUTING_MODEL, and SYNTHESIZER_MODEL
 
 ## Tech Stack
 
@@ -151,8 +151,10 @@ data: {"thread_id":"123","status":"failed","message":"boom"}
 
 Example values in .env.example:
 
-- CURRENT_MODEL="gpt-4o"
+- CURRENT_MODEL="gpt-4.1"
 - CURRENT_MODEL="gemini-2.0-flash" (also supports fully-qualified `gemini/gemini-2.0-flash`)
+- ROUTING_MODEL="gpt-4o-mini" (used by router_analyzer)
+- SYNTHESIZER_MODEL="gpt-4o-mini" (used by synthesizer)
 - LLM_BASE_URL="" (optional: custom provider base URL, uses LiteLLM/provider default when empty)
 - LLM_API_KEY="" (used when LLM_BASE_URL is set)
 - GEOSERVER_WFS_URL="http://localhost:8080/geoserver/wfs"
