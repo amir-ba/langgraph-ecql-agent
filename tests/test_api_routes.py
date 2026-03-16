@@ -33,8 +33,7 @@ def test_spatial_chat_streams_graph_updates_as_sse(monkeypatch) -> None:
             yield {
                 "synthesizer": {
                     "final_response": {
-                        "summary": "Found 2 matching features in the requested area.",
-                        "geojson": {"type": "FeatureCollection", "features": []},
+                        "summary": "Found 2 matching features in the requested area."
                     }
                 }
             }
@@ -58,30 +57,15 @@ def test_spatial_chat_streams_graph_updates_as_sse(monkeypatch) -> None:
     assert frames[1] == ("update", {"thread_id": "123", "update": {"router": {"relevance": "spatial"}}})
     assert frames[2] == ("update", {"thread_id": "123", "update": {"schema": {"geometry_column": "the_geom"}}})
     assert frames[3] == (
-        "update",
-        {
-            "thread_id": "123",
-            "update": {
-                "synthesizer": {
-                    "final_response": {
-                        "summary": "Found 2 matching features in the requested area.",
-                        "geojson": {"type": "FeatureCollection", "features": []},
-                    }
-                }
-            },
-        },
-    )
-    assert frames[4] == (
         "final",
         {
             "thread_id": "123",
             "final_response": {
-                "summary": "Found 2 matching features in the requested area.",
-                "geojson": {"type": "FeatureCollection", "features": []},
+                "summary": "Found 2 matching features in the requested area."
             },
         },
     )
-    assert frames[5] == ("done", {"thread_id": "123", "status": "completed"})
+    assert frames[4] == ("done", {"thread_id": "123", "status": "completed"})
 
     assert fake_graph.calls[0]["inputs"]["user_query"] == "Find hospitals in Berlin"
     assert fake_graph.calls[0]["inputs"]["retry_count"] == 0
@@ -128,8 +112,7 @@ def test_spatial_chat_emits_final_event_with_null_geojson_when_unavailable(monke
                 "router_analyzer": {
                     "intent": "general_chat",
                     "final_response": {
-                        "summary": "Hello!",
-                        "geojson": None,
+                        "summary": "Hello!"
                     },
                 }
             }
@@ -153,9 +136,42 @@ def test_spatial_chat_emits_final_event_with_null_geojson_when_unavailable(monke
         {
             "thread_id": "chat-1",
             "final_response": {
-                "summary": "Hello!",
-                "geojson": None,
+                "summary": "Hello!"
             },
         },
     )
     assert frames[3] == ("done", {"thread_id": "chat-1", "status": "completed"})
+
+
+def test_spatial_chat_redacts_available_layers_to_count(monkeypatch) -> None:
+    class FakeGraph:
+        async def astream(self, inputs, stream_mode, config):
+            yield {
+                "wfs_discovery": {
+                    "available_layers": [
+                        {"name": "layer_1", "title": "Layer One", "abstract": ""},
+                        {"name": "layer_2", "title": "Layer Two", "abstract": ""},
+                    ]
+                }
+            }
+
+    monkeypatch.setattr("app.api.routes.graph", FakeGraph())
+
+    with TestClient(app) as client:
+        with client.stream(
+            "POST",
+            "/api/spatial-chat",
+            json={"query": "find layers", "thread_id": "layers-1"},
+        ) as response:
+            assert response.status_code == 200
+            body = "".join(response.iter_text())
+
+    frames = _parse_sse_frames(body)
+    assert frames[0] == ("status", {"thread_id": "layers-1", "status": "starting"})
+    assert frames[1] == (
+        "update",
+        {
+            "thread_id": "layers-1",
+            "update": {"wfs_discovery": {"available_layers_count": 2}},
+        },
+    )

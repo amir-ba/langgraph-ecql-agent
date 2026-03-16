@@ -1,7 +1,7 @@
 from typing import Any
 import logging
 
-from litellm import completion
+from litellm import acompletion, completion
 from pydantic import BaseModel
 
 from app.core.settings import get_settings
@@ -108,4 +108,77 @@ def invoke_llm(
 
     output = response_format.model_validate(content)
     logger.debug("[invoke_llm] output(parsed-object)=%s", output.model_dump())
+    return output
+
+
+async def ainvoke_llm(
+    messages: list[dict[str, str]],
+    response_format: type[BaseModel] | None = None,
+    output_schema: type[BaseModel] | None = None,
+    agent_state: dict | None = None,
+) -> str | BaseModel:
+    if output_schema is not None:
+        if response_format is not None and response_format is not output_schema:
+            raise ValueError("Provide only one schema or ensure response_format matches output_schema")
+        response_format = output_schema
+
+    settings = get_settings()
+    model_name = _normalize_model_name(settings.current_model)
+    llm_base_url = settings.llm_base_url.strip()
+    logger.debug(
+        "[ainvoke_llm] input model=%s base_url_set=%s message_count=%s response_format=%s",
+        model_name,
+        bool(llm_base_url),
+        len(messages),
+        response_format.__name__ if response_format is not None else None,
+    )
+    logger.debug("[ainvoke_llm] messages=%s", messages)
+
+    kwargs: dict[str, Any] = {
+        "model": model_name,
+        "messages": messages,
+    }
+    if llm_base_url:
+        kwargs["base_url"] = llm_base_url
+
+    api_key = settings.llm_api_key.strip() if llm_base_url else _resolve_provider_api_key(settings, model_name)
+    if api_key:
+        kwargs["api_key"] = api_key
+
+    if response_format is not None:
+        kwargs["response_format"] = response_format
+
+    logger.debug("[ainvoke_llm] calling acompletion")
+
+    response = await acompletion(**kwargs)
+    logger.debug("[ainvoke_llm] acompletion returned response type=%s", type(response).__name__)
+    # Aggregate usage if agent_state is provided
+    usage = getattr(response, "usage", None)
+    if usage and agent_state is not None:
+        agg = agent_state.setdefault("aggregate_usage", {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "request_count": 0,
+        })
+        agg["prompt_tokens"] += usage.get("prompt_tokens", 0)
+        agg["completion_tokens"] += usage.get("completion_tokens", 0)
+        agg["total_tokens"] += usage.get("total_tokens", 0)
+        agg["request_count"] += 1
+
+    content = _extract_message_content(response)
+    logger.debug("[ainvoke_llm] extracted content type=%s", type(content).__name__)
+
+    if response_format is None:
+        output = str(content)
+        logger.debug("[ainvoke_llm] output(raw)=%s", output)
+        return output
+
+    if isinstance(content, str):
+        output = response_format.model_validate_json(content)
+        logger.debug("[ainvoke_llm] output(parsed-json)=%s", output.model_dump())
+        return output
+
+    output = response_format.model_validate(content)
+    logger.debug("[ainvoke_llm] output(parsed-object)=%s", output.model_dump())
     return output

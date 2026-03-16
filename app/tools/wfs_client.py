@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -155,9 +156,9 @@ def _describe_feature_type_with_owslib(
     return {"attributes": attributes, "geometry_column": geometry_column}
 
 
-def discover_layers(
+async def discover_layers(
     wfs_url: str,
-    http_client: httpx.Client | None = None,
+    http_client: httpx.AsyncClient | None = None,
     timeout: float = 15.0,
     username: str | None = None,
     password: str | None = None,
@@ -176,23 +177,31 @@ def discover_layers(
 
     if http_client is None:
         try:
-            layers = _discover_layers_with_owslib(
-                wfs_url=wfs_url,
-                timeout=timeout,
-                username=username,
-                password=password,
+            layers = await asyncio.to_thread(
+                _discover_layers_with_owslib,
+                wfs_url,
+                timeout,
+                username,
+                password,
             )
             _capabilities_cache[cache_key] = (now + _CAPABILITIES_CACHE_TTL_SECONDS, _cache_copy(layers))
             return layers
         except Exception:
             pass
 
-    client = http_client or httpx.Client(timeout=timeout)
-    response = client.get(
-        wfs_url,
-        params={"service": "WFS", "request": "GetCapabilities"},
-        auth=_build_auth(username, password),
-    )
+    if http_client is None:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(
+                wfs_url,
+                params={"service": "WFS", "request": "GetCapabilities"},
+                auth=_build_auth(username, password),
+            )
+    else:
+        response = await http_client.get(
+            wfs_url,
+            params={"service": "WFS", "request": "GetCapabilities"},
+            auth=_build_auth(username, password),
+        )
     response.raise_for_status()
     layers = _discover_layers_from_xml(response.text)
     if http_client is None:
@@ -226,50 +235,63 @@ def filter_layers_by_subject(
     return filtered
 
 
-def describe_feature_type(
+async def describe_feature_type(
     wfs_url: str,
     type_name: str,
-    http_client: httpx.Client | None = None,
+    http_client: httpx.AsyncClient | None = None,
     timeout: float = 15.0,
     username: str | None = None,
     password: str | None = None,
 ) -> dict[str, Any]:
     if http_client is None:
         try:
-            return _describe_feature_type_with_owslib(
-                wfs_url=wfs_url,
-                type_name=type_name,
-                timeout=timeout,
-                username=username,
-                password=password,
+            return await asyncio.to_thread(
+                _describe_feature_type_with_owslib,
+                wfs_url,
+                type_name,
+                timeout,
+                username,
+                password,
             )
         except Exception:
             pass
 
-    client = http_client or httpx.Client(timeout=timeout)
-    response = client.get(
-        wfs_url,
-        params={
-            "service": "WFS",
-            "version": "2.0.0",
-            "request": "DescribeFeatureType",
-            "typeNames": type_name,
-        },
-        auth=_build_auth(username, password),
-    )
+    if http_client is None:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(
+                wfs_url,
+                params={
+                    "service": "WFS",
+                    "version": "2.0.0",
+                    "request": "DescribeFeatureType",
+                    "typeNames": type_name,
+                },
+                auth=_build_auth(username, password),
+            )
+    else:
+        response = await http_client.get(
+            wfs_url,
+            params={
+                "service": "WFS",
+                "version": "2.0.0",
+                "request": "DescribeFeatureType",
+                "typeNames": type_name,
+            },
+            auth=_build_auth(username, password),
+        )
     response.raise_for_status()
     return _describe_feature_type_from_xml(response.text)
 
 
-def get_layer_schema(
+async def get_layer_schema(
     wfs_url: str,
     type_name: str,
-    http_client: httpx.Client | None = None,
+    http_client: httpx.AsyncClient | None = None,
     timeout: float = 15.0,
     username: str | None = None,
     password: str | None = None,
 ) -> tuple[dict[str, str], str]:
-    schema = describe_feature_type(
+    schema = await describe_feature_type(
         wfs_url=wfs_url,
         type_name=type_name,
         http_client=http_client,
@@ -280,32 +302,50 @@ def get_layer_schema(
     return schema["attributes"], schema["geometry_column"]
 
 
-def execute_wfs_query(
+async def execute_wfs_query(
     wfs_url: str,
     type_name: str,
     cql_filter: str,
     count: int = 1000,
+    srs_name: str = "EPSG:3857",
     output_format: str = "application/json",
-    http_client: httpx.Client | None = None,
+    http_client: httpx.AsyncClient | None = None,
     timeout: float = 20.0,
     username: str | None = None,
     password: str | None = None,
 ) -> dict[str, Any]:
-    client = http_client or httpx.Client(timeout=timeout)
     safe_count = min(max(1, count), 1000)
 
-    response = client.get(
-        wfs_url,
-        params={
-            "service": "WFS",
-            "version": "2.0.0",
-            "request": "GetFeature",
-            "typeNames": type_name,
-            "outputFormat": output_format,
-            "cql_filter": cql_filter,
-            "count": safe_count,
-        },
-        auth=_build_auth(username, password),
-    )
+    if http_client is None:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(
+                wfs_url,
+                params={
+                    "service": "WFS",
+                    "version": "2.0.0",
+                    "request": "GetFeature",
+                    "typeNames": type_name,
+                    "srsName": srs_name,
+                    "outputFormat": output_format,
+                    "cql_filter": cql_filter,
+                    "count": safe_count,
+                },
+                auth=_build_auth(username, password),
+            )
+    else:
+        response = await http_client.get(
+            wfs_url,
+            params={
+                "service": "WFS",
+                "version": "2.0.0",
+                "request": "GetFeature",
+                "typeNames": type_name,
+                "srsName": srs_name,
+                "outputFormat": output_format,
+                "cql_filter": cql_filter,
+                "count": safe_count,
+            },
+            auth=_build_auth(username, password),
+        )
     response.raise_for_status()
     return response.json()

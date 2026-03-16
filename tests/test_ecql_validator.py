@@ -48,3 +48,62 @@ def test_validate_ecql_accepts_valid_spatial_filter() -> None:
 
     assert is_valid is True
     assert error is None
+
+
+def test_validate_ecql_rejects_include_keyword() -> None:
+    is_valid, error = validate_ecql(
+        ecql_string="INCLUDE",
+        layer_schema={"STATE_NAME": "xsd:string", "PERSONS": "xsd:int"},
+        geometry_column="the_geom",
+    )
+
+    assert is_valid is False
+    assert error is not None
+    assert "non-constraining" in error.lower() or "constrain" in error.lower()
+
+
+def test_validate_ecql_rejects_constant_true_comparison() -> None:
+    is_valid, error = validate_ecql(
+        ecql_string="1 = 1",
+        layer_schema={"STATE_NAME": "xsd:string", "PERSONS": "xsd:int"},
+        geometry_column="the_geom",
+    )
+
+    assert is_valid is False
+    assert error is not None
+    assert "constrain" in error.lower()
+
+
+def test_validate_ecql_rejects_self_comparison() -> None:
+    is_valid, error = validate_ecql(
+        ecql_string="PERSONS = PERSONS",
+        layer_schema={"STATE_NAME": "xsd:string", "PERSONS": "xsd:int"},
+        geometry_column="the_geom",
+    )
+
+    assert is_valid is False
+    assert error is not None
+    assert "non-constraining" in error.lower()
+
+
+def test_validate_ecql_rejects_or_with_always_true_branch() -> None:
+    is_valid, error = validate_ecql(
+        ecql_string="PERSONS > 100 OR 1 = 1",
+        layer_schema={"STATE_NAME": "xsd:string", "PERSONS": "xsd:int"},
+        geometry_column="the_geom",
+    )
+
+    assert is_valid is False
+    assert error is not None
+    assert "always true" in error.lower()
+
+
+def test_validate_ecql_accepts_redundant_true_and_real_predicate() -> None:
+    is_valid, error = validate_ecql(
+        ecql_string="1 = 1 AND PERSONS > 1000",
+        layer_schema={"STATE_NAME": "xsd:string", "PERSONS": "xsd:int"},
+        geometry_column="the_geom",
+    )
+
+    assert is_valid is True
+    assert error is None

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 import logging
 from typing import Any, Literal, cast
 
@@ -20,18 +20,18 @@ from app.graph.nodes import (
 )
 from app.graph.state import AgentState
 
-NodeFn = Callable[[AgentState], dict[str, Any]]
+NodeFn = Callable[[AgentState], Awaitable[dict[str, Any]]]
 logger = logging.getLogger(__name__)
 
 
 def _with_node_logging(node_name: str, node_fn: NodeFn) -> NodeFn:
-    def _wrapped(state: AgentState) -> dict[str, Any]:
+    async def _wrapped(state: AgentState) -> dict[str, Any]:
         logger.debug(
             "[graph] node_triggered=%s state_keys=%s",
             node_name,
             sorted(state.keys()),
         )
-        output = node_fn(state)
+        output = await node_fn(state)
         logger.debug(
             "[graph] node_completed=%s output_keys=%s",
             node_name,
@@ -55,6 +55,12 @@ def validator_router(state: AgentState) -> Literal["generator", "fallback", "exe
     if state.get("validation_error"):
         return "fallback"
     return "executor"
+
+
+def layer_selector_router(state: AgentState) -> Literal["schema", "fallback"]:
+    if state.get("validation_error") and not state.get("selected_layer"):
+        return "fallback"
+    return "schema"
 
 
 def executor_router(state: AgentState) -> Literal["generator", "fallback", "synthesizer"]:
@@ -98,7 +104,14 @@ def build_graph(node_overrides: Mapping[str, NodeFn] | None = None):
 
     builder.add_edge("geocoder", "discoverer")
     builder.add_edge("discoverer", "layer_selector")
-    builder.add_edge("layer_selector", "schema")
+    builder.add_conditional_edges(
+        "layer_selector",
+        layer_selector_router,
+        {
+            "schema": "schema",
+            "fallback": "fallback",
+        },
+    )
     builder.add_edge("schema", "generator")
     builder.add_edge("generator", "validator")
 

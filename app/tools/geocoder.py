@@ -16,12 +16,12 @@ class OAuthToken:
 
 
 class OAuthClientCredentialsProvider:
-    def __init__(self, settings: Settings, http_client: httpx.Client) -> None:
+    def __init__(self, settings: Settings, http_client: httpx.AsyncClient) -> None:
         self._settings = settings
         self._http_client = http_client
         self._token: OAuthToken | None = None
 
-    def get_access_token(self) -> str:
+    async def get_access_token(self) -> str:
         now = datetime.now(timezone.utc)
         if self._token and now < self._token.expires_at:
             return self._token.value
@@ -30,7 +30,7 @@ class OAuthClientCredentialsProvider:
         if not token_url:
             raise ValueError("Missing GEOCODER_TOKEN_URL for OAuth client credentials flow")
 
-        response = self._http_client.post(
+        response = await self._http_client.post(
             token_url,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             data={
@@ -56,12 +56,12 @@ class OAuthClientCredentialsProvider:
 
 
 class GeocoderClient:
-    def __init__(self, settings: Settings | None = None, http_client: httpx.Client | None = None) -> None:
+    def __init__(self, settings: Settings | None = None, http_client: httpx.AsyncClient | None = None) -> None:
         self._settings = settings or get_settings()
-        self._http_client = http_client or httpx.Client(timeout=15.0)
+        self._http_client = http_client or httpx.AsyncClient(timeout=15.0)
         self._oauth = OAuthClientCredentialsProvider(settings=self._settings, http_client=self._http_client)
 
-    def forward(
+    async def forward(
         self,
         zip_code: str | None = None,
         city: str | None = None,
@@ -78,30 +78,30 @@ class GeocoderClient:
             "maxResults": max_results,
             "epsg": epsg,
         }
-        return self._get("/geocoder/v1/forward", params=params)
+        return await self._get("/geocoder/v1/forward", params=params)
 
-    def forward_fulltext(self, query: str, max_results: int = 5, epsg: int = 4326) -> dict[str, Any]:
-        return self._get(
+    async def forward_fulltext(self, query: str, max_results: int = 5, epsg: int = 4326) -> dict[str, Any]:
+        return await self._get(
             "/geocoder/v1/forward/fulltext",
             params={"query": query, "maxResults": max_results, "epsg": epsg},
         )
 
-    def reverse(self, coord: str, epsg: int | None = None, max_dist: float = 0.05) -> dict[str, Any]:
+    async def reverse(self, coord: str, epsg: int | None = None, max_dist: float = 0.05) -> dict[str, Any]:
         params: dict[str, Any] = {"coord": coord, "maxDist": max_dist}
         if epsg is not None:
             params["epsg"] = epsg
-        return self._get("/geocoder/v1/reverse", params=params)
+        return await self._get("/geocoder/v1/reverse", params=params)
 
-    def suggest(self, query: str, max_results: int = 5) -> dict[str, Any]:
-        return self._get("/geocoder/v1/suggest", params={"query": query, "maxResults": max_results})
+    async def suggest(self, query: str, max_results: int = 5) -> dict[str, Any]:
+        return await self._get("/geocoder/v1/suggest", params={"query": query, "maxResults": max_results})
 
-    def select(self, address_id: str, epsg: int = 4326) -> dict[str, Any]:
-        return self._get(f"/geocoder/v1/select/{address_id}", params={"epsg": epsg})
+    async def select(self, address_id: str, epsg: int = 4326) -> dict[str, Any]:
+        return await self._get(f"/geocoder/v1/select/{address_id}", params={"epsg": epsg})
 
-    def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
-        access_token = self._oauth.get_access_token()
+    async def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+        access_token = await self._oauth.get_access_token()
         base_url = self._settings.geocoder_api_url.rstrip("/")
-        response = self._http_client.get(
+        response = await self._http_client.get(
             f"{base_url}{path}",
             headers={"Authorization": f"Bearer {access_token}"},
             params={k: v for k, v in params.items() if v is not None},

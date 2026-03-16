@@ -158,6 +158,7 @@ Example values in .env.example:
 - GEOSERVER_WFS_URL="http://localhost:8080/geoserver/wfs"
 - GEOSERVER_WFS_USERNAME=""
 - GEOSERVER_WFS_PASSWORD=""
+- GEOSERVER_WFS_SRS_NAME="EPSG:3857"
 - GEOCODER_API_URL="https://stargate-cetus.prod.tardis.telekom.de/geo"
 - GEOCODER_TOKEN_URL="https://.../oauth/token"
 - GEOCODER_CLIENT_ID=""
@@ -172,6 +173,39 @@ Notes:
 - When LLM_BASE_URL is empty, configure the provider-specific key for CURRENT_MODEL (OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY).
 - Keep .env local and do not commit secrets.
 - The geocoder integration uses OAuth2 client credentials flow; provide token URL, client ID, and client secret.
+- `GEOSERVER_WFS_SRS_NAME` is used as `srsName` in final WFS GetFeature requests.
+
+## Architecture Overview
+
+The following diagram illustrates the high-level flow of the backend system:
+
+```mermaid
+graph TD
+        START(User Query) --> Router[router_analyzer]
+
+        Router -- "irrelevant" --> END
+        Router -- "spatial_query" --> Geocoder[geocoder]
+
+        Geocoder --> Discoverer[discoverer]
+        Discoverer --> LayerSelector[layer_selector]
+
+        LayerSelector -- "selected_layer present" --> Schema[schema]
+        LayerSelector -- "validation_error + empty selected_layer" --> Fallback[fallback]
+
+        Schema --> Generator[generator]
+        Generator --> Validator{validator}
+
+        Validator -- "invalid + retries < 3" --> Generator
+        Validator -- "invalid + retries >= 3" --> Fallback
+        Validator -- "valid" --> Executor[executor]
+
+        Executor -- "error + retries < 3" --> Generator
+        Executor -- "error + retries >= 3" --> Fallback
+        Executor -- "success" --> Synthesizer[synthesizer]
+
+        Synthesizer --> END
+        Fallback --> END
+```
 
 ## Development
 

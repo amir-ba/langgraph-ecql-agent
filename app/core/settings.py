@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     geoserver_wfs_url: str = "http://localhost:8080/geoserver/wfs"
     geoserver_wfs_username: str = ""
     geoserver_wfs_password: str = ""
+    geoserver_wfs_srs_name: str = "EPSG:3857"
+
+    layer_catalog_markdown_path: str = "layer_catalog.md"
+    layer_catalog_stale_after_hours: int = 8
 
     geocoder_api_url: str = "https://stargate-cetus.prod.tardis.telekom.de/geo"
     geocoder_token_url: str = ""

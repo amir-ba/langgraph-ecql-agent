@@ -5,10 +5,11 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.core.http_clients import HttpClientPool, get_http_client_pool
 from app.graph.builder import graph
 from app.graph.state import build_initial_state
 
@@ -27,28 +28,43 @@ def _format_sse_event(event: str, payload: dict[str, object]) -> str:
 def _normalize_final_response(value: Any, fallback_summary: str) -> dict[str, object]:
     if isinstance(value, dict):
         summary = value.get("summary")
-        geojson = value.get("geojson")
-        return {
-            "summary": str(summary) if summary is not None else fallback_summary,
-            "geojson": geojson if isinstance(geojson, dict) or geojson is None else None,
-        }
+        result = {"summary": str(summary) if summary is not None else fallback_summary}
+        if "geojson" in value:
+            geojson = value.get("geojson")
+            result["geojson"] = geojson if isinstance(geojson, dict) or geojson is None else None
+        return result
 
     if isinstance(value, str):
-        return {
-            "summary": value,
-            "geojson": None,
-        }
+        return {"summary": value}
 
-    return {
-        "summary": fallback_summary,
-        "geojson": None,
-    }
+    return {"summary": fallback_summary}
+
+
+def _sanitize_update_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            if key == "available_layers" and isinstance(item, list):
+                sanitized["available_layers_count"] = len(item)
+                continue
+            sanitized[key] = _sanitize_update_payload(item)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_update_payload(item) for item in value]
+    return value
 
 
 @router.post("/spatial-chat")
-async def spatial_chat(payload: SpatialChatRequest) -> StreamingResponse:
+async def spatial_chat(
+    payload: SpatialChatRequest,
+    http_client_pool: HttpClientPool = Depends(get_http_client_pool),
+) -> StreamingResponse:
     async def event_stream() -> AsyncIterator[str]:
-        inputs = build_initial_state(payload.query)
+        inputs = build_initial_state(
+            payload.query,
+            geocoder_http_client=http_client_pool.geocoder,
+            wfs_http_client=http_client_pool.wfs,
+        )
         latest_state: dict[str, Any] = dict(inputs)
         logger.debug("[spatial_chat] received query=%s thread_id=%s", payload.query, payload.thread_id)
         config = {"configurable": {"thread_id": payload.thread_id}}
@@ -60,7 +76,13 @@ async def spatial_chat(payload: SpatialChatRequest) -> StreamingResponse:
                     for node_update in update.values():
                         if isinstance(node_update, dict):
                             latest_state.update(node_update)
-                event = {"thread_id": payload.thread_id, "update": update}
+                    # Suppress synthesizer step updates to avoid duplicating the final SSE payload.
+                    if "synthesizer" in update:
+                        continue
+                event = {
+                    "thread_id": payload.thread_id,
+                    "update": _sanitize_update_payload(update),
+                }
                 yield _format_sse_event("update", event)
 
             fallback_summary = "Request processed."

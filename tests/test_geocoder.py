@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -46,7 +47,7 @@ def test_geocoder_uses_oauth_token_for_fulltext_forwarding() -> None:
         raise AssertionError(f"Unexpected request URL: {request.url}")
 
     transport = httpx.MockTransport(handler)
-    client = httpx.Client(transport=transport)
+    client = httpx.AsyncClient(transport=transport)
 
     settings = Settings(
         geocoder_api_url="https://example.test/geo",
@@ -56,7 +57,7 @@ def test_geocoder_uses_oauth_token_for_fulltext_forwarding() -> None:
     )
 
     geocoder = GeocoderClient(settings=settings, http_client=client)
-    payload = geocoder.forward_fulltext(query="bonn friedrich ebert allee 140")
+    payload = asyncio.run(geocoder.forward_fulltext(query="bonn friedrich ebert allee 140"))
 
     assert payload["Result"][0]["Address"]["Label"].startswith("53113 Bonn")
     assert len(requests_seen) == 2
@@ -69,7 +70,7 @@ def test_geocoder_raises_for_non_zero_response_header_status() -> None:
         return httpx.Response(200, json={"responseHeader": {"status": 4}, "error": {"msg": "bad query"}})
 
     transport = httpx.MockTransport(handler)
-    client = httpx.Client(transport=transport)
+    client = httpx.AsyncClient(transport=transport)
 
     settings = Settings(
         geocoder_api_url="https://example.test/geo",
@@ -81,4 +82,4 @@ def test_geocoder_raises_for_non_zero_response_header_status() -> None:
     geocoder = GeocoderClient(settings=settings, http_client=client)
 
     with pytest.raises(ValueError, match="status=4"):
-        geocoder.reverse(coord="50.7,7.1,4326")
+        asyncio.run(geocoder.reverse(coord="50.7,7.1,4326"))

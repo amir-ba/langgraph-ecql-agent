@@ -25,6 +25,83 @@ def _iter_nodes(node: object) -> Iterator[object]:
         yield from _iter_nodes(value)
 
 
+def _is_scalar_literal(value: object) -> bool:
+    return isinstance(value, str | int | float | bool)
+
+
+def _is_self_comparison(node: object) -> bool:
+    if not isinstance(
+        node,
+        ast.Equal | ast.NotEqual | ast.GreaterThan | ast.GreaterEqual | ast.LessThan | ast.LessEqual,
+    ):
+        return False
+
+    return (
+        isinstance(node.lhs, ast.Attribute)
+        and isinstance(node.rhs, ast.Attribute)
+        and node.lhs.name == node.rhs.name
+    )
+
+
+def _constant_truth_value(node: object) -> bool | None:
+    # INCLUDE/EXCLUDE are explicit boolean constants in ECQL.
+    if isinstance(node, ast.Include):
+        return not node.not_
+
+    if isinstance(node, ast.Not):
+        sub_value = _constant_truth_value(node.sub_node)
+        if sub_value is None:
+            return None
+        return not sub_value
+
+    if isinstance(node, ast.And):
+        lhs = _constant_truth_value(node.lhs)
+        rhs = _constant_truth_value(node.rhs)
+        if lhs is False or rhs is False:
+            return False
+        if lhs is True and rhs is True:
+            return True
+        return None
+
+    if isinstance(node, ast.Or):
+        lhs = _constant_truth_value(node.lhs)
+        rhs = _constant_truth_value(node.rhs)
+        if lhs is True or rhs is True:
+            return True
+        if lhs is False and rhs is False:
+            return False
+        return None
+
+    if isinstance(
+        node,
+        ast.Equal | ast.NotEqual | ast.GreaterThan | ast.GreaterEqual | ast.LessThan | ast.LessEqual,
+    ):
+        if _is_self_comparison(node):
+            if isinstance(node, ast.Equal | ast.GreaterEqual | ast.LessEqual):
+                return True
+            return False
+
+        if _is_scalar_literal(node.lhs) and _is_scalar_literal(node.rhs):
+            if isinstance(node, ast.Equal):
+                return node.lhs == node.rhs
+            if isinstance(node, ast.NotEqual):
+                return node.lhs != node.rhs
+            if isinstance(node, ast.GreaterThan):
+                return node.lhs > node.rhs
+            if isinstance(node, ast.GreaterEqual):
+                return node.lhs >= node.rhs
+            if isinstance(node, ast.LessThan):
+                return node.lhs < node.rhs
+            if isinstance(node, ast.LessEqual):
+                return node.lhs <= node.rhs
+
+    return None
+
+
+def _has_attribute_reference(node: object) -> bool:
+    return any(isinstance(candidate, ast.Attribute) for candidate in _iter_nodes(node))
+
+
 def validate_ecql(ecql_string: str, layer_schema: dict[str, str], geometry_column: str) -> tuple[bool, str | None]:
     try:
         root = parse(ecql_string)
@@ -45,5 +122,17 @@ def validate_ecql(ecql_string: str, layer_schema: dict[str, str], geometry_colum
                     f"Spatial predicate must use geometry column '{geometry_column}', "
                     f"got '{getattr(lhs, 'name', lhs)}'"
                 )
+
+    if not _has_attribute_reference(root):
+        return False, (
+            "ECQL must include at least one layer attribute or geometry predicate "
+            "to constrain results"
+        )
+
+    truth_value = _constant_truth_value(root)
+    if truth_value is True:
+        return False, "ECQL is non-constraining (always true); provide a real filter predicate"
+    if truth_value is False:
+        return False, "ECQL is non-constraining (always false); provide a real filter predicate"
 
     return True, None

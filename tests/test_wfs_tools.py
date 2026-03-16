@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 import pytest
 
@@ -24,7 +26,7 @@ def test_discover_layers_uses_owslib_when_http_client_is_not_provided(monkeypatc
 
   monkeypatch.setattr("app.tools.wfs_client.WebFeatureService", _FakeWFS)
 
-  layers = discover_layers(wfs_url="https://example.test/geoserver/wfs")
+  layers = asyncio.run(discover_layers(wfs_url="https://example.test/geoserver/wfs"))
 
   assert layers == [
     {
@@ -54,10 +56,10 @@ def test_describe_feature_type_uses_owslib_schema_when_http_client_is_not_provid
 
   monkeypatch.setattr("app.tools.wfs_client.WebFeatureService", _FakeWFS)
 
-  schema = describe_feature_type(
+  schema = asyncio.run(describe_feature_type(
     wfs_url="https://example.test/geoserver/wfs",
     type_name="topp:states",
-  )
+  ))
 
   assert schema["geometry_column"] == "the_geom"
   assert schema["attributes"]["STATE_NAME"] == "xsd:string"
@@ -80,10 +82,10 @@ def test_discover_layers_parses_feature_types() -> None:
         assert request.url.params["request"] == "GetCapabilities"
         return httpx.Response(200, text=xml)
 
-    layers = discover_layers(
+    layers = asyncio.run(discover_layers(
         wfs_url="https://example.test/geoserver/wfs",
-        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
-    )
+      http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    ))
 
     assert layers == [
         {
@@ -117,11 +119,11 @@ def test_describe_feature_type_extracts_schema_and_geometry_column() -> None:
         assert request.url.params["typeNames"] == "topp:states"
         return httpx.Response(200, text=xsd)
 
-    schema = describe_feature_type(
+    schema = asyncio.run(describe_feature_type(
         wfs_url="https://example.test/geoserver/wfs",
         type_name="topp:states",
-        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
-    )
+      http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    ))
 
     assert schema["geometry_column"] == "the_geom"
     assert schema["attributes"]["STATE_NAME"] == "xsd:string"
@@ -134,17 +136,18 @@ def test_execute_wfs_query_enforces_count_guardrail() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.params["request"] == "GetFeature"
         assert request.url.params["typeNames"] == "topp:states"
+        assert request.url.params["srsName"] == "EPSG:3857"
         assert request.url.params["cql_filter"] == "PERSONS > 1000000"
         assert request.url.params["count"] == "1000"
         return httpx.Response(200, json=payload)
 
-    result = execute_wfs_query(
+    result = asyncio.run(execute_wfs_query(
         wfs_url="https://example.test/geoserver/wfs",
         type_name="topp:states",
         cql_filter="PERSONS > 1000000",
         count=5000,
-        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
-    )
+      http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    ))
 
     assert result == payload
 
@@ -170,11 +173,11 @@ def test_get_layer_schema_returns_attributes_and_geometry_column() -> None:
             """,
         )
 
-    layer_schema, geometry_column = get_layer_schema(
+    layer_schema, geometry_column = asyncio.run(get_layer_schema(
         wfs_url="https://example.test/geoserver/wfs",
         type_name="topp:states",
-        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
-    )
+      http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    ))
 
     assert layer_schema == {"the_geom": "gml:MultiSurfacePropertyType", "STATE_NAME": "xsd:string"}
     assert geometry_column == "the_geom"
@@ -187,14 +190,14 @@ def test_execute_wfs_query_uses_basic_auth_when_credentials_are_provided() -> No
         assert request.headers["Authorization"].startswith("Basic ")
         return httpx.Response(200, json=payload)
 
-    result = execute_wfs_query(
+    result = asyncio.run(execute_wfs_query(
         wfs_url="https://example.test/geoserver/wfs",
         type_name="topp:states",
         cql_filter="PERSONS > 1000000",
         username="demo-user",
         password="demo-pass",
-        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
-    )
+      http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    ))
 
     assert result == payload
 
@@ -231,8 +234,8 @@ def test_discover_layers_reuses_cached_capabilities_with_same_inputs(monkeypatch
 
   monkeypatch.setattr("app.tools.wfs_client.WebFeatureService", _FakeWFS)
 
-  first = discover_layers(wfs_url="https://example.test/geoserver/wfs")
-  second = discover_layers(wfs_url="https://example.test/geoserver/wfs")
+  first = asyncio.run(discover_layers(wfs_url="https://example.test/geoserver/wfs"))
+  second = asyncio.run(discover_layers(wfs_url="https://example.test/geoserver/wfs"))
 
   assert first == second
   assert call_count == 1
@@ -258,9 +261,9 @@ def test_discover_layers_cache_expires_after_ttl(monkeypatch) -> None:
   monkeypatch.setattr("app.tools.wfs_client.WebFeatureService", _FakeWFS)
   monkeypatch.setattr("app.tools.wfs_client.time.time", lambda: clock["now"])
 
-  discover_layers(wfs_url="https://example.test/geoserver/wfs")
+  asyncio.run(discover_layers(wfs_url="https://example.test/geoserver/wfs"))
   clock["now"] += (12 * 60 * 60) + 1
-  discover_layers(wfs_url="https://example.test/geoserver/wfs")
+  asyncio.run(discover_layers(wfs_url="https://example.test/geoserver/wfs"))
 
   assert call_count == 2
 
@@ -287,16 +290,22 @@ def test_discover_layers_does_not_cache_failed_discovery(monkeypatch) -> None:
     def __init__(self, timeout: float) -> None:
       self.timeout = timeout
 
-    def get(self, *args, **kwargs):
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+      return None
+
+    async def get(self, *args, **kwargs):
       raise RuntimeError("temporary failure")
 
   monkeypatch.setattr("app.tools.wfs_client.WebFeatureService", _FakeWFS)
-  monkeypatch.setattr("app.tools.wfs_client.httpx.Client", _FakeHttpClient)
+  monkeypatch.setattr("app.tools.wfs_client.httpx.AsyncClient", _FakeHttpClient)
 
   with pytest.raises(RuntimeError):
-    discover_layers(wfs_url="https://example.test/geoserver/wfs")
+    asyncio.run(discover_layers(wfs_url="https://example.test/geoserver/wfs"))
 
-  layers = discover_layers(wfs_url="https://example.test/geoserver/wfs")
+  layers = asyncio.run(discover_layers(wfs_url="https://example.test/geoserver/wfs"))
 
   assert layers[0]["name"] == "topp:states"
   assert call_count == 2
