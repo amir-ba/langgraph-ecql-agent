@@ -52,9 +52,12 @@ class AnalyzedIntent(BaseModel):
         default=None,
         description="The location name (e.g., 'Berlin', 'Central Park'). Null if none mentioned.",
     )
-    spatial_filter: SpatialFilterDef | None = Field(
+    spatial_filters: list[SpatialFilterDef] | None = Field(
         default=None,
-        description="Structured spatial relationship. Null if no location filtering is requested.",
+        description=(
+            "List of spatial predicates when the query contains spatial filters. "
+            "Use a single-item list if only one spatial predicate is present."
+        ),
     )
     layer_subject: str | None = Field(
         default=None,

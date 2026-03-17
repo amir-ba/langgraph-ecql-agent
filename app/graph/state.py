@@ -14,12 +14,12 @@ class AgentState(TypedDict):
     final_response: NotRequired[FinalResponsePayload | None]
 
     spatial_reference: NotRequired[str | None]
-    spatial_filter: NotRequired[dict[str, Any] | None]
+    spatial_filters: NotRequired[list[dict[str, Any] | None] | None]
     layer_subject: NotRequired[str | None]
     attribute_hints: NotRequired[list[str]]
-    spatial_context: NotRequired[dict[str, Any] | None]
-    explicit_coordinates: NotRequired[list[float] | None]
-    explicit_bbox: NotRequired[list[float] | None]
+    spatial_contexts: NotRequired[list[dict[str, Any]] | None]
+    explicit_coordinates: NotRequired[list[float] | list[list[float]] | None]
+    explicit_bbox: NotRequired[list[float] | list[list[float]] | None]
 
     available_layers: NotRequired[list[dict[str, str]]]
     layer_catalog_markdown: NotRequired[str]
@@ -54,10 +54,9 @@ def build_initial_state(
         intent="irrelevant",
         final_response=None,
         spatial_reference=None,
-        spatial_filter=None,
         layer_subject=None,
         attribute_hints=[],
-        spatial_context=None,
+        spatial_contexts=[],
         retry_count=0,
         validation_error=None,
         aggregate_usage={

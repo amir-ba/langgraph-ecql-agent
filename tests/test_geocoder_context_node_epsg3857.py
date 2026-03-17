@@ -29,13 +29,14 @@ def test_geocoder_context_node_bbox_epsg3857(monkeypatch):
     # Explicit user intent distance (e.g., 7km)
     state = {
         "spatial_reference": "Heidelberg",
-        "spatial_filter": {"predicate": "DWITHIN", "distance": 7, "units": "kilometers"},
+        "spatial_filters": [{"predicate": "DWITHIN", "distance": 7, "units": "kilometers"}],
         "geocoder_http_client": None,
     }
     monkeypatch.setattr("app.graph.nodes.GeocoderClient", lambda **kwargs: DummyGeocoder())
     updates = asyncio.run(geocoder_context_node(state))
-    bbox = updates["spatial_context"]["bbox"]
+    context = updates["spatial_contexts"][0]
+    bbox = context["bbox"]
     assert isinstance(bbox, list) and len(bbox) == 4
-    assert updates["spatial_context"]["crs"] == "EPSG:4326"
-    assert updates["spatial_context"]["geometry_type"] == "Polygon"
-    assert updates["spatial_context"]["geometry_wkt"].startswith("POLYGON")
+    assert context["crs"] == "EPSG:4326"
+    assert context["geometry_type"] == "Polygon"
+    assert context["geometry_wkt"].startswith("SRID=4326;POLYGON")

@@ -41,7 +41,7 @@ def test_build_graph_spatial_path_success() -> None:
 
     async def geocoder_node(_):
         call_order.append("geocoder")
-        return {"spatial_context": {"crs": "EPSG:4326", "bbox": [0, 0, 1, 1]}}
+        return {"spatial_contexts": [{"crs": "EPSG:4326", "bbox": [0, 0, 1, 1]}]}
 
     async def discoverer_node(_):
         call_order.append("discoverer")
@@ -109,7 +109,7 @@ def test_build_graph_validator_retry_loop() -> None:
         return {"intent": "spatial_query", "layer_subject": "states"}
 
     async def geocoder_node(_):
-        return {"spatial_context": {"crs": "EPSG:4326", "bbox": [0, 0, 1, 1]}}
+        return {"spatial_contexts": [{"crs": "EPSG:4326", "bbox": [0, 0, 1, 1]}]}
 
     async def discoverer_node(_):
         return {"available_layers": [{"name": "topp:states", "title": "States", "abstract": ""}]}
@@ -167,7 +167,7 @@ def test_build_graph_executor_retry_loop() -> None:
         return {"intent": "spatial_query", "layer_subject": "states"}
 
     async def geocoder_node(_):
-        return {"spatial_context": {"crs": "EPSG:4326", "bbox": [0, 0, 1, 1]}}
+        return {"spatial_contexts": [{"crs": "EPSG:4326", "bbox": [0, 0, 1, 1]}]}
 
     async def discoverer_node(_):
         return {"available_layers": [{"name": "topp:states", "title": "States", "abstract": ""}]}
@@ -245,7 +245,7 @@ def test_build_graph_routes_to_fallback_after_layer_selector_low_confidence() ->
 
     async def geocoder_node(_):
         call_order.append("geocoder")
-        return {"spatial_context": {"crs": "EPSG:4326", "bbox": [0, 0, 1, 1]}}
+        return {"spatial_contexts": [{"crs": "EPSG:4326", "bbox": [0, 0, 1, 1]}]}
 
     async def discoverer_node(_):
         call_order.append("discoverer")

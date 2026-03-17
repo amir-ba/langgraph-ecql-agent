@@ -21,10 +21,10 @@ def test_build_initial_state_sets_defaults() -> None:
     assert state["intent"] == "irrelevant"
     assert state["final_response"] is None
     assert state["spatial_reference"] is None
-    assert state["spatial_filter"] is None
+    assert state.get("spatial_filters") is None
     assert state["layer_subject"] is None
     assert state["attribute_hints"] == []
-    assert state["spatial_context"] is None
+    assert state["spatial_contexts"] == []
     assert state["retry_count"] == 0
     assert state["validation_error"] is None
     assert state["aggregate_usage"] == {
@@ -40,7 +40,7 @@ def test_unified_router_analyzer_node_returns_spatial_entities(monkeypatch) -> N
         intent="spatial_query",
         general_response=None,
         spatial_reference="Bonn",
-        spatial_filter=SpatialFilterDef(predicate="DWITHIN", distance=5, units="kilometers"),
+        spatial_filters=[SpatialFilterDef(predicate="DWITHIN", distance=5, units="kilometers")],
         layer_subject="schools",
         attribute_hints=["capacity > 100"],
     )
@@ -68,11 +68,13 @@ def test_unified_router_analyzer_node_returns_spatial_entities(monkeypatch) -> N
         "spatial_reference": "Bonn",
         "explicit_coordinates": None,
         "explicit_bbox": None,
-        "spatial_filter": {
-            "predicate": "DWITHIN",
-            "distance": 5.0,
-            "units": "kilometers",
-        },
+        "spatial_filters": [
+            {
+                "predicate": "DWITHIN",
+                "distance": 5.0,
+                "units": "kilometers",
+            }
+        ],
         "layer_subject": "schools",
         "attribute_hints": ["capacity > 100"],
     }
@@ -83,7 +85,7 @@ def test_unified_router_analyzer_node_returns_irrelevant_response(monkeypatch) -
         intent="irrelevant",
         general_response="Hello! How can I help with geospatial analysis today?",
         spatial_reference=None,
-        spatial_filter=None,
+        spatial_filters=None,
         layer_subject=None,
         attribute_hints=None,
     )
@@ -112,7 +114,7 @@ def test_unified_router_analyzer_node_returns_irrelevant_response(monkeypatch) -
         "spatial_reference": None,
         "explicit_coordinates": None,
         "explicit_bbox": None,
-        "spatial_filter": None,
+        "spatial_filters": None,
         "layer_subject": None,
         "attribute_hints": [],
     }
@@ -133,10 +135,11 @@ def test_geocoder_context_node_uses_deterministic_geocoder(monkeypatch) -> None:
 
     updates = asyncio.run(geocoder_context_node({"spatial_reference": "Berlin"}))
 
-    assert isinstance(updates["spatial_context"]["bbox"], list)
-    assert len(updates["spatial_context"]["bbox"]) == 4
-    assert updates["spatial_context"]["crs"] == "EPSG:4326"
-    assert updates["spatial_context"]["geometry_type"] == "Polygon"
+    context = updates["spatial_contexts"][0]
+    assert isinstance(context["bbox"], list)
+    assert len(context["bbox"]) == 4
+    assert context["crs"] == "EPSG:4326"
+    assert context["geometry_type"] == "Polygon"
 
 
 def test_layer_discoverer_node_selects_layer(monkeypatch) -> None:
@@ -144,7 +147,14 @@ def test_layer_discoverer_node_selects_layer(monkeypatch) -> None:
         layer_name = "topp:states"
         confidence = "high"
 
-    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None, model_name=None):
+    async def fake_ainvoke_llm(
+        *,
+        messages,
+        response_format,
+        agent_state=None,
+        model_name=None,
+        enable_prompt_cache=None,
+    ):
         assert "Layer catalog markdown" in messages[1]["content"]
         assert response_format.__name__ == "LayerSelection"
         return _Layer()
@@ -171,7 +181,14 @@ def test_layer_discoverer_node_uses_layer_subject_primary_single_match(monkeypat
         layer_name = "city:hospitals"
         confidence = "high"
 
-    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None, model_name=None):
+    async def fake_ainvoke_llm(
+        *,
+        messages,
+        response_format,
+        agent_state=None,
+        model_name=None,
+        enable_prompt_cache=None,
+    ):
         assert "Layer subject:\nhospitals" in messages[1]["content"]
         return _Layer()
 
@@ -198,7 +215,14 @@ def test_layer_discoverer_node_uses_filtered_candidates_for_llm_tiebreak(monkeyp
         layer_name = "city:hospitals_general"
         confidence = "high"
 
-    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None, model_name=None):
+    async def fake_ainvoke_llm(
+        *,
+        messages,
+        response_format,
+        agent_state=None,
+        model_name=None,
+        enable_prompt_cache=None,
+    ):
         prompt = messages[1]["content"]
         assert "city:hospitals_general" in prompt
         assert "city:hospitals_specialized" in prompt
@@ -246,7 +270,14 @@ def test_layer_discoverer_node_falls_back_to_full_list_when_subject_has_no_match
         layer_name = "city:roads"
         confidence = "high"
 
-    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None, model_name=None):
+    async def fake_ainvoke_llm(
+        *,
+        messages,
+        response_format,
+        agent_state=None,
+        model_name=None,
+        enable_prompt_cache=None,
+    ):
         prompt = messages[1]["content"]
         assert "Layer subject:\nschools" in prompt
         assert "city:hospitals" in prompt
@@ -283,7 +314,13 @@ def test_layer_discoverer_node_gracefully_falls_back_on_low_confidence(monkeypat
         layer_name = "city:roads"
         confidence = "low"
 
-    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None):
+    async def fake_ainvoke_llm(
+        *,
+        messages,
+        response_format,
+        agent_state=None,
+        enable_prompt_cache=None,
+    ):
         assert "Layer catalog markdown" in messages[1]["content"]
         return _Layer()
 
@@ -352,23 +389,107 @@ def test_ecql_generator_node_increments_retry_and_returns_ecql(monkeypatch) -> N
             "user_query": "states with high population",
             "layer_schema": {"PERSONS": "xsd:int"},
             "geometry_column": "the_geom",
-            "spatial_context": {
-                "crs": "EPSG:4326",
-                "bbox": [-10, -10, 10, 10],
-                "geometry_wkt": "POLYGON ((-10 -10, 10 -10, 10 10, -10 10, -10 -10))",
-                "geometry_type": "Polygon",
-            },
-            "spatial_filter": {"predicate": "INTERSECTS"},
+            "spatial_contexts": [
+                {
+                    "crs": "EPSG:4326",
+                    "bbox": [-10, -10, 10, 10],
+                    "geometry_wkt": "POLYGON ((-10 -10, 10 -10, 10 10, -10 10, -10 -10))",
+                    "geometry_type": "Polygon",
+                },
+            ],
+            "spatial_filters": [{"predicate": "INTERSECTS"}],
             "attribute_hints": ["capacity > 100"],
             "validation_error": "Unknown attribute",
             "retry_count": 1,
         }
     ))
 
-    assert "BBOX(the_geom, -10, -10, 10, 10, 'EPSG:4326')" in updates["generated_ecql"]
     assert "INTERSECTS(the_geom" in updates["generated_ecql"]
     assert "PERSONS > 1000" in updates["generated_ecql"]
     assert updates["retry_count"] == 2
+
+
+def test_ecql_generator_node_builds_multi_spatial_ecql(monkeypatch) -> None:
+    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None):
+        assert response_format is ECQLGeneration
+        return ECQLGeneration(reasoning="Use attributes only", ecql_string="PERSONS > 1000")
+
+    monkeypatch.setattr("app.graph.nodes.ainvoke_llm", fake_ainvoke_llm)
+
+    updates = asyncio.run(ecql_generator_node(
+        {
+            "user_query": "states near bbox and point",
+            "layer_schema": {"PERSONS": "xsd:int"},
+            "geometry_column": "the_geom",
+            "spatial_contexts": [
+                {
+                    "crs": "EPSG:4326",
+                    "bbox": [7.0, 50.0, 7.5, 50.5],
+                    "geometry_wkt": (
+                        "POLYGON ((7.0 50.0, 7.5 50.0, 7.5 50.5, 7.0 50.5, 7.0 50.0))"
+                    ),
+                    "geometry_type": "Polygon",
+                },
+                {
+                    "crs": "EPSG:4326",
+                    "bbox": [7.19, 50.19, 7.21, 50.21],
+                    "geometry_wkt": "POINT (7.2 50.2)",
+                    "geometry_type": "Point",
+                },
+            ],
+            "spatial_filters": [
+                None,
+                {"predicate": "DWITHIN", "distance": 100, "units": "meters"},
+            ],
+            "attribute_hints": [],
+            "validation_error": None,
+            "retry_count": 0,
+        }
+    ))
+
+    assert "BBOX(the_geom, 7.0, 50.0, 7.5, 50.5, 'EPSG:4326')" in updates["generated_ecql"]
+    assert "DWITHIN(the_geom, SRID=4326;POINT (7.2 50.2), 100, meters)" in updates["generated_ecql"]
+    assert "PERSONS > 1000" in updates["generated_ecql"]
+
+
+def test_ecql_generator_node_avoids_duplicate_bbox_for_duplicated_reference_context(monkeypatch) -> None:
+    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None):
+        assert response_format is ECQLGeneration
+        return ECQLGeneration(reasoning="Use attributes only", ecql_string="manager = 'NBG-Maps'")
+
+    monkeypatch.setattr("app.graph.nodes.ainvoke_llm", fake_ainvoke_llm)
+
+    hamburg_context = {
+        "source": "reference",
+        "crs": "EPSG:4326",
+        "bbox": [9.621463608102793, 53.303866335746676, 10.519778892222314, 53.837305712419166],
+        "geometry_wkt": (
+            "POLYGON ((10.519778892222314 53.303866335746676, "
+            "10.519778892222314 53.837305712419166, "
+            "9.621463608102793 53.837305712419166, "
+            "9.621463608102793 53.303866335746676, "
+            "10.519778892222314 53.303866335746676))"
+        ),
+        "geometry_type": "Polygon",
+    }
+
+    updates = asyncio.run(ecql_generator_node(
+        {
+            "user_query": "Show me all archeive new development areas managed by NBG-Maps in hamburg",
+            "layer_schema": {"manager": "xsd:string"},
+            "geometry_column": "wkb_geometry",
+            "spatial_contexts": [hamburg_context],
+            "spatial_filters": [{"predicate": "INTERSECTS"}],
+            "attribute_hints": ["manager = 'NBG-Maps'"],
+            "validation_error": None,
+            "retry_count": 0,
+        }
+    ))
+
+    generated_ecql = updates["generated_ecql"]
+    assert "BBOX(wkb_geometry" not in generated_ecql
+    assert "INTERSECTS(wkb_geometry, SRID=4326;POLYGON" in generated_ecql
+    assert "manager = 'NBG-Maps'" in generated_ecql
 
 
 def test_synthesizer_node_returns_llm_summary(monkeypatch) -> None:
@@ -478,4 +599,4 @@ def test_wfs_executor_node_returns_wfs_result(monkeypatch) -> None:
 def test_geocoder_context_node_no_spatial_reference_returns_empty_context() -> None:
     updates = asyncio.run(geocoder_context_node({"user_query": "show schools"}))
 
-    assert updates == {"spatial_context": None}
+    assert updates == {"spatial_contexts": []}

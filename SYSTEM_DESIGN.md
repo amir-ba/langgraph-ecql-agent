@@ -80,10 +80,10 @@ Agent state is a TypedDict passed across nodes. Key fields:
     - final_response
 - Spatial interpretation:
     - spatial_reference
-    - spatial_filter
+    - spatial_filters: list of spatial predicate definitions (multi-filter support)
     - explicit_coordinates
     - explicit_bbox
-    - spatial_context
+    - spatial_contexts: list of geocoded spatial contexts (aligned with filters)
 - Layer context:
     - available_layers
     - layer_catalog_markdown
@@ -112,7 +112,11 @@ Agent state is a TypedDict passed across nodes. Key fields:
 - Produces irrelevant response immediately when applicable.
 
 ### 6.2 geocoder
-- Resolves location into normalized spatial_context:
+ - Resolves location into normalized spatial_contexts:
+     - crs
+     - bbox
+     - geometry_wkt
+     - geometry_type
     - crs
     - bbox
     - geometry_wkt
@@ -134,14 +138,15 @@ Agent state is a TypedDict passed across nodes. Key fields:
 - Fetches DescribeFeatureType and extracts attributes plus geometry column.
 
 ### 6.6 generator
-- Builds spatial ECQL deterministically from spatial context and filter.
-- Requests attribute-only ECQL from LLM.
-- Merges both parts into final ECQL.
+- Builds spatial ECQL deterministically from lists of spatial contexts and filters.
+    - Supports composing multiple spatial predicates (AND-composed ECQL) for multi-filter queries.
+    - Requests attribute-only ECQL from LLM.
+    - Merges both parts into final ECQL.
 
 ### 6.7 validator
 - Parses ECQL with pygeofilter.
-- Verifies schema and geometry usage.
-- Rejects non-constraining expressions.
+    - Validates all composed spatial predicates and schema usage.
+    - Rejects non-constraining or invalid multi-predicate expressions.
 
 ### 6.8 executor
 - Executes WFS GetFeature with bounded count and configured srsName.
@@ -177,18 +182,17 @@ Key environment-driven settings:
     - invalid or low-confidence layer selections never proceed to schema or execution
 
 ## 10. Current Limitations and Next Iterations
+
 - Single-layer selection per request (no multi-layer joins yet)
 - Limited interactive geometry workflows (drawn polygons and multi-step refinement not yet first-class)
+- Multi-spatial-predicate queries are now fully supported; single-predicate is a special case of the list-based design.
 - Future extension candidates:
     - multi-layer orchestration
     - richer alias curation and domain ontologies
     - explicit user-guided disambiguation loop for close matches
- 
-multiple spatial filter
-geospatial query bigger than bigest
-multi layer
-- select layer as part of query
-- improve retreival accuracy
+    - geospatial query bigger than biggest
+    - select layer as part of query
+    - improve retrieval accuracy
 
 
 

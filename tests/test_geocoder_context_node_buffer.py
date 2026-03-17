@@ -33,10 +33,11 @@ def test_geocoder_context_node_city_matchlevel(monkeypatch):
     }
     monkeypatch.setattr("app.graph.nodes.GeocoderClient", lambda **kwargs: DummyGeocoder())
     updates = asyncio.run(geocoder_context_node(state))
-    bbox = updates["spatial_context"]["bbox"]
+    context = updates["spatial_contexts"][0]
+    bbox = context["bbox"]
     assert isinstance(bbox, list) and len(bbox) == 4
-    assert updates["spatial_context"]["crs"] == "EPSG:4326"
-    assert updates["spatial_context"]["geometry_type"] == "Polygon"
+    assert context["crs"] == "EPSG:4326"
+    assert context["geometry_type"] == "Polygon"
 
 def test_geocoder_context_node_fallback_default(monkeypatch):
     # No explicit distance, no matchlevel, should use fallback (5km)
@@ -68,7 +69,8 @@ def test_geocoder_context_node_fallback_default(monkeypatch):
     }
     monkeypatch.setattr("app.graph.nodes.GeocoderClient", lambda **kwargs: DummyGeocoderNoLevel())
     updates = asyncio.run(geocoder_context_node(state))
-    bbox = updates["spatial_context"]["bbox"]
+    context = updates["spatial_contexts"][0]
+    bbox = context["bbox"]
     assert isinstance(bbox, list) and len(bbox) == 4
-    assert updates["spatial_context"]["crs"] == "EPSG:4326"
-    assert updates["spatial_context"]["geometry_type"] == "Point"
+    assert context["crs"] == "EPSG:4326"
+    assert context["geometry_type"] == "Point"

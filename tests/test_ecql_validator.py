@@ -50,6 +50,20 @@ def test_validate_ecql_accepts_valid_spatial_filter() -> None:
     assert error is None
 
 
+def test_validate_ecql_accepts_multiple_spatial_predicates() -> None:
+    is_valid, error = validate_ecql(
+        ecql_string=(
+            "BBOX(the_geom, -10, -10, 10, 10) AND "
+            "DWITHIN(the_geom, POINT(7 50), 100, meters)"
+        ),
+        layer_schema={"STATE_NAME": "xsd:string", "PERSONS": "xsd:int"},
+        geometry_column="the_geom",
+    )
+
+    assert is_valid is True
+    assert error is None
+
+
 def test_validate_ecql_rejects_include_keyword() -> None:
     is_valid, error = validate_ecql(
         ecql_string="INCLUDE",

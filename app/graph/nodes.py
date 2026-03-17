@@ -71,6 +71,88 @@ def _normalize_bbox(value: Any) -> list[float] | None:
     return None
 
 
+def _normalize_bbox_list(value: Any) -> list[list[float]]:
+    if isinstance(value, list) and len(value) == 4:
+        normalized = _normalize_bbox(value)
+        return [normalized] if normalized is not None else []
+    if isinstance(value, list):
+        items: list[list[float]] = []
+        for entry in value:
+            normalized = _normalize_bbox(entry)
+            if normalized is not None:
+                items.append(normalized)
+        return items
+    return []
+
+
+def _normalize_coordinate_pair(value: Any) -> list[float] | None:
+    if isinstance(value, list) and len(value) == 2:
+        try:
+            return [float(value[0]), float(value[1])]
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _normalize_coordinate_list(value: Any) -> list[list[float]]:
+    if isinstance(value, list) and len(value) == 2:
+        normalized = _normalize_coordinate_pair(value)
+        return [normalized] if normalized is not None else []
+    if isinstance(value, list):
+        items: list[list[float]] = []
+        for entry in value:
+            normalized = _normalize_coordinate_pair(entry)
+            if normalized is not None:
+                items.append(normalized)
+        return items
+    return []
+
+
+def _normalize_spatial_references(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, list):
+        return [str(entry) for entry in value if isinstance(entry, str) and entry.strip()]
+    return []
+
+
+def _normalize_spatial_filters(value: Any) -> list[dict[str, Any] | None]:
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return [entry if isinstance(entry, dict) else None for entry in value]
+    return []
+
+
+def _align_spatial_filters(
+    filters: list[dict[str, Any] | None],
+    count: int,
+) -> list[dict[str, Any] | None]:
+    if count <= 0:
+        return []
+    if not filters:
+        return [None for _ in range(count)]
+    if len(filters) >= count:
+        return filters[:count]
+    return filters + [None for _ in range(count - len(filters))]
+
+
+def _extract_srid(crs: str) -> int | None:
+    normalized = str(crs).strip().upper()
+    if normalized.startswith("EPSG:"):
+        code = normalized.split(":", 1)[1].strip()
+        if code.isdigit():
+            return int(code)
+    return None
+
+
+def _to_ewkt(wkt: str, crs: str) -> str:
+    srid = _extract_srid(crs)
+    if srid is None:
+        return wkt
+    return f"SRID={srid};{wkt}"
+
+
 def _normalize_geojson_payload(value: Any) -> dict[str, Any] | None:
     if isinstance(value, dict):
         return value
@@ -114,17 +196,21 @@ async def unified_router_analyzer_node(state: AgentState) -> dict[str, Any]:
             summary = "I can help with spatial queries against available map layers."
         final_payload = _build_final_response(summary=summary)
 
+    spatial_filters_payload = None
+    if result.spatial_filters:
+        spatial_filters_payload = [
+            spatial_filter.model_dump(exclude_none=True)
+            for spatial_filter in result.spatial_filters
+            if spatial_filter is not None
+        ]
+
     output = {
         "intent": result.intent,
         "final_response": final_payload,
         "spatial_reference": result.spatial_reference,
         "explicit_coordinates": result.explicit_coordinates,
         "explicit_bbox": _normalize_bbox(result.explicit_bbox),
-        "spatial_filter": (
-            result.spatial_filter.model_dump(exclude_none=True)
-            if result.spatial_filter is not None
-            else None
-        ),
+        "spatial_filters": spatial_filters_payload,
         "layer_subject": result.layer_subject,
         "attribute_hints": result.attribute_hints or [],
     }
@@ -133,90 +219,106 @@ async def unified_router_analyzer_node(state: AgentState) -> dict[str, Any]:
 
 
 async def geocoder_context_node(state: AgentState) -> dict[str, Any]:
-    query = state.get("spatial_reference") or ""
+    spatial_references = _normalize_spatial_references(state.get("spatial_reference"))
+    explicit_bboxes = _normalize_bbox_list(state.get("explicit_bbox"))
+    explicit_coordinates = _normalize_coordinate_list(state.get("explicit_coordinates"))
+    spatial_filters = _normalize_spatial_filters(state.get("spatial_filters"))
 
-    logger.debug("[geocoder_context_node] input query=%s", query)
+    logger.debug(
+        "[geocoder_context_node] input references=%s explicit_bboxes=%s explicit_coordinates=%s",
+        spatial_references,
+        len(explicit_bboxes),
+        len(explicit_coordinates),
+    )
 
-    # 1. BYPASS 1: Explicit Bounding Box
-    explicit_bbox = state.get("explicit_bbox")
-    if isinstance(explicit_bbox, list) and len(explicit_bbox) == 4:
-        min_x, min_y, max_x, max_y = explicit_bbox
-        
-        # Construct a WKT Polygon out of the 4 BBOX corners
-        # Note: WKT Polygons must be closed (first point == last point)
-        wkt_polygon = (
-            f"POLYGON(({min_x} {min_y}, {min_x} {max_y}, "
-            f"{max_x} {max_y}, {max_x} {min_y}, {min_x} {min_y}))"
-        )
-        
-        output = {
-            "spatial_context": {
-                "crs": "EPSG:4326",
-                "bbox": [min_x, min_y, max_x, max_y],
-                "geometry_wkt": wkt_polygon,
-                "geometry_type": "Polygon"
-            }
-        }
-        return output
+    # Check for 'Germany' reference (case-insensitive)
+    germany_bbox = [5.86632, 47.27011, 15.04193, 55.09916]
+    germany_ref = None
+    for ref in spatial_references:
+        if ref.strip().lower() == "germany":
+            germany_ref = ref
+            break
 
-    # 2. BYPASS 2: Explicit Point Coordinates (from previous step)
-    explicit_coordinates = state.get("explicit_coordinates")
-    if isinstance(explicit_coordinates, list) and len(explicit_coordinates) == 2:
-        lon, lat = explicit_coordinates
-        
-        # Create a Micro-Buffer (~11 meters) to make a valid BBOX
-        epsilon = 0.0001
-        bbox =[lon - epsilon, lat - epsilon, lon + epsilon, lat + epsilon]
-        
-        output = {
-            "spatial_context": {
-                "crs": "EPSG:4326",
-                "bbox": bbox,
-                "geometry_wkt": f"POINT({lon} {lat})",
-                "geometry_type": "Point"
-            }
-        }
-        return output
-    if not query:
-        output = {"spatial_context": None}
+    # If explicit bbox or coordinates exist, ignore 'Germany' reference
+    requests: list[tuple[str, Any]] = []
+    for bbox in explicit_bboxes:
+        requests.append(("bbox", bbox))
+    for coord in explicit_coordinates:
+        requests.append(("point", coord))
+
+    # Only use 'Germany' bbox as fallback if no explicit bbox/coordinates
+    if not requests and germany_ref:
+        requests.append(("bbox", germany_bbox))
+        spatial_references = [r for r in spatial_references if r.strip().lower() != "germany"]
+
+    # Add remaining spatial references (excluding 'Germany' if fallback used)
+    for reference in spatial_references:
+        requests.append(("reference", reference))
+
+    if not requests:
+        output = {"spatial_contexts": []}
         logger.debug("[geocoder_context_node] output=%s", _as_json(output))
         return output
+
+    aligned_filters = _align_spatial_filters(spatial_filters, len(requests))
+    contexts: list[dict[str, Any]] = []
+
     geocoder_http_client = cast(httpx.AsyncClient | None, state.get("geocoder_http_client"))
     geocoder = GeocoderClient(http_client=geocoder_http_client)
 
-    # 1. Use /suggest endpoint to get locationType
-    suggest_payload = await geocoder.suggest(query=query, max_results=1)
-    suggest_results = suggest_payload.get("SuggestResult") or []
-    location_type = None
-    if suggest_results:
-        location_type = suggest_results[0].get("locationType")
+    for (kind, value), spatial_filter in zip(requests, aligned_filters):
+        if kind == "bbox":
+            min_x, min_y, max_x, max_y = value
+            crs = "EPSG:4326"
+            wkt_polygon = (
+                f"POLYGON(({min_x} {min_y}, {min_x} {max_y}, "
+                f"{max_x} {max_y}, {max_x} {min_y}, {min_x} {min_y}))"
+            )
+            contexts.append(
+                {
+                    "source": "explicit_bbox" if value != germany_bbox else "fallback_germany_bbox",
+                    "crs": crs,
+                    "bbox": [min_x, min_y, max_x, max_y],
+                    "geometry_wkt": _to_ewkt(wkt_polygon, crs),
+                    "geometry_type": "Polygon",
+                }
+            )
+            continue
 
-    # 2. Use fulltext search to get coordinates
-    payload = await geocoder.forward_fulltext(query=query, max_results=1, epsg=4326)
-    results = payload.get("Result") or []
-    first_result = results[0] if results else {}
+        if kind == "point":
+            lon, lat = value
+            crs = "EPSG:4326"
+            bbox = _build_bbox_for_point(lon, lat, spatial_filter)
+            contexts.append(
+                {
+                    "source": "explicit_point",
+                    "crs": crs,
+                    "bbox": bbox,
+                    "geometry_wkt": _to_ewkt(f"POINT({lon} {lat})", crs),
+                    "geometry_type": "Point",
+                }
+            )
+            continue
 
-    
+        if kind == "reference":
+            context = await _resolve_reference_context(str(value), spatial_filter, geocoder)
+            if context is None:
+                output = {"spatial_contexts": []}
+                logger.debug("[geocoder_context_node] output=%s", _as_json(output))
+                return output
+            contexts.append(context)
 
-    # Otherwise, try to use Coordinate and buffer logic
-    coord_str = first_result.get("Coordinate")
-    if not coord_str:
-        output = {"spatial_context": None}
-        logger.debug("[geocoder_context_node] output=%s", _as_json(output))
-        return output
+    output: dict[str, Any] = {"spatial_contexts": contexts}
+    logger.debug("[geocoder_context_node] output=%s", _as_json(output))
+    return output
 
-    # Parse lat,lon
-    try:
-        lat_str, lon_str = coord_str.split(",")
-        lat, lon = float(lat_str.strip()), float(lon_str.strip())
-    except Exception:  # pragma: no cover - defensive parsing for provider payload differences
-        output = {"spatial_context": None}
-        logger.debug("[geocoder_context_node] output=%s", _as_json(output))
-        return output
 
-    # 1. Explicit user intent from structured predicate (DWITHIN/BEYOND)
+def _build_bbox_for_point(
+    lon: float,
+    lat: float,
+    spatial_filter: dict[str, Any] | None,
+) -> list[float]:
     buffer_m = None
-    spatial_filter = state.get("spatial_filter")
     if isinstance(spatial_filter, dict):
         predicate = str(spatial_filter.get("predicate") or "").upper()
         distance = spatial_filter.get("distance")
@@ -224,7 +326,58 @@ async def geocoder_context_node(state: AgentState) -> dict[str, Any]:
         if predicate in {"DWITHIN", "BEYOND"} and isinstance(distance, int | float) and isinstance(units, str):
             buffer_m = _distance_to_meters(float(distance), units)
 
-    # 2. Heuristic by locationType from /suggest
+    if buffer_m is None:
+        epsilon = 0.0001
+        return [lon - epsilon, lat - epsilon, lon + epsilon, lat + epsilon]
+
+    transformer_to_3857 = Transformer.from_crs(4326, 3857, always_xy=True)
+    transformer_to_4326 = Transformer.from_crs(3857, 4326, always_xy=True)
+    x, y = transformer_to_3857.transform(lon, lat)
+    minx = x - buffer_m
+    maxx = x + buffer_m
+    miny = y - buffer_m
+    maxy = y + buffer_m
+    llon, llat = transformer_to_4326.transform(min(minx, maxx), min(miny, maxy))
+    ulon, ulat = transformer_to_4326.transform(max(minx, maxx), max(miny, maxy))
+    return [llon, llat, ulon, ulat]
+
+
+async def _resolve_reference_context(
+    query: str,
+    spatial_filter: dict[str, Any] | None,
+    geocoder: GeocoderClient,
+) -> dict[str, Any] | None:
+    if not query:
+        return None
+
+    suggest_payload = await geocoder.suggest(query=query, max_results=1)
+    suggest_results = suggest_payload.get("SuggestResult") or []
+    location_type = None
+    if suggest_results:
+        location_type = suggest_results[0].get("locationType")
+
+    payload = await geocoder.forward_fulltext(query=query, max_results=1, epsg=4326)
+    results = payload.get("Result") or []
+    first_result = results[0] if results else {}
+
+    coord_str = first_result.get("Coordinate")
+    if not coord_str:
+        return None
+
+    try:
+        lat_str, lon_str = coord_str.split(",")
+        lat, lon = float(lat_str.strip()), float(lon_str.strip())
+    except Exception:
+        return None
+
+    buffer_m = None
+    if isinstance(spatial_filter, dict):
+        predicate = str(spatial_filter.get("predicate") or "").upper()
+        distance = spatial_filter.get("distance")
+        units = spatial_filter.get("units")
+        if predicate in {"DWITHIN", "BEYOND"} and isinstance(distance, int | float) and isinstance(units, str):
+            buffer_m = _distance_to_meters(float(distance), units)
+
     if buffer_m is None:
         locationtype_to_buffer = {
             "Address": 500,
@@ -237,12 +390,10 @@ async def geocoder_context_node(state: AgentState) -> dict[str, Any]:
         if location_type in locationtype_to_buffer:
             buffer_m = locationtype_to_buffer[location_type]
 
-    # 3. Fallback default
     if buffer_m is None:
         buffer_m = 5000
     logger.info("[geocoder_context_node] buffer_m=%s", buffer_m)
 
-    # Buffer in metric CRS and convert back to EPSG:4326 for ECQL BBOX with explicit CRS.
     transformer_to_3857 = Transformer.from_crs(4326, 3857, always_xy=True)
     transformer_to_4326 = Transformer.from_crs(3857, 4326, always_xy=True)
     x, y = transformer_to_3857.transform(lon, lat)
@@ -255,25 +406,24 @@ async def geocoder_context_node(state: AgentState) -> dict[str, Any]:
     llon, llat = transformer_to_4326.transform(min(minx, maxx), min(miny, maxy))
     ulon, ulat = transformer_to_4326.transform(max(minx, maxx), max(miny, maxy))
     bbox_4326 = [llon, llat, ulon, ulat]
-    # Determine geometry type and WKT based on location_type
+
     if location_type in {"POI", "Address", "Unknown"}:
         geometry_wkt = Point(lon, lat).wkt
         geometry_type = "Point"
     else:
-        # Create a polygon from the bbox
         polygon = box(*bbox_4326)
         geometry_wkt = polygon.wkt
         geometry_type = "Polygon"
-    output = {
-        "spatial_context": {
-            "crs": "EPSG:4326",
-            "bbox": bbox_4326,
-            "geometry_wkt": geometry_wkt,
-            "geometry_type": geometry_type,
-        }
+
+    crs = "EPSG:4326"
+
+    return {
+        "source": "reference",
+        "crs": crs,
+        "bbox": bbox_4326,
+        "geometry_wkt": _to_ewkt(geometry_wkt, crs),
+        "geometry_type": geometry_type,
     }
-    logger.debug("[geocoder_context_node] output=%s", _as_json(output))
-    return output
 
 
 async def wfs_discovery_node(state: AgentState) -> dict[str, list[dict[str, str]] | str | None]:
@@ -444,10 +594,12 @@ async def ecql_generator_node(state: AgentState) -> dict[str, str | int]:
         state.get("user_query", ""),
         state.get("retry_count", 0),
     )
+    spatial_contexts = state.get("spatial_contexts")
+    spatial_filters = state.get("spatial_filters")
     spatial_ecql = build_spatial_ecql(
         geom_column=state.get("geometry_column", ""),
-        spatial_context=cast(dict[str, Any] | None, state.get("spatial_context")),
-        spatial_filter=cast(dict[str, Any] | None, state.get("spatial_filter")),
+        spatial_contexts=cast(list[dict[str, Any]] | None, spatial_contexts),
+        spatial_filters=cast(list[dict[str, Any] | None] | None, spatial_filters),
     )
 
     messages = [
