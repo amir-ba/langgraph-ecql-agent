@@ -6,7 +6,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # Install uv for reproducible dependency resolution from uv.lock.
-RUN pip install --no-cache-dir uv
+RUN python -m pip --version >/dev/null 2>&1 || python -m ensurepip --upgrade
+RUN python -m pip install --no-cache-dir uv
 
 # Copy dependency metadata first to maximize Docker layer caching.
 COPY pyproject.toml uv.lock ./
