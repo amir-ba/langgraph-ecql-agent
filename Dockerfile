@@ -2,7 +2,8 @@ FROM mtr.devops.telekom.de/community/python:3.12@sha256:2dabc7b4e421d7fef1ca495e
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    UV_PROJECT_ENVIRONMENT=/home/cloud/.venv
+    UV_PROJECT_ENVIRONMENT=/home/cloud/.venv \
+    PATH="/home/cloud/.venv/bin:${PATH}"
 
 WORKDIR /home/cloud/app
 
@@ -17,6 +18,7 @@ RUN python -m uv sync --frozen --no-dev --no-install-project
 # Copy the FastAPI application source.
 COPY . .
 
-EXPOSE 8000
+EXPOSE 8080
 
-CMD ["python", "-m", "uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Avoid a runtime dependency on `python -m uv`; run uvicorn directly from the venv.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
