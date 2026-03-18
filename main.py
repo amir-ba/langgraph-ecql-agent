@@ -19,8 +19,8 @@ def configure_logging() -> None:
         app_logger.handlers = [handler]
     app_logger.propagate = False
 
-    logging.getLogger("litellm").setLevel(logging.WARNING)
-    logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+    logging.getLogger("litellm").setLevel(uvicorn_error.getEffectiveLevel())
+    logging.getLogger("LiteLLM").setLevel(uvicorn_error.getEffectiveLevel())
 
 
 configure_logging()
