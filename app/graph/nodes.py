@@ -19,7 +19,6 @@ from app.tools.spatial_ecql_builder import build_spatial_ecql
 from app.tools.wfs_client import (
     discover_layers,
     execute_wfs_query,
-    filter_layers_by_subject,
     get_layer_schema,
 )
 from app.tools.layer_catalog import (
@@ -152,11 +151,6 @@ def _to_ewkt(wkt: str, crs: str) -> str:
         return wkt
     return f"SRID={srid};{wkt}"
 
-
-def _normalize_geojson_payload(value: Any) -> dict[str, Any] | None:
-    if isinstance(value, dict):
-        return value
-    return None
 
 
 async def unified_router_analyzer_node(state: AgentState) -> dict[str, Any]:

@@ -47,6 +47,8 @@ def _sanitize_update_payload(value: Any) -> Any:
             if key == "available_layers" and isinstance(item, list):
                 sanitized["available_layers_count"] = len(item)
                 continue
+            if key == "layer_catalog_markdown":
+                continue
             sanitized[key] = _sanitize_update_payload(item)
         return sanitized
     if isinstance(value, list):

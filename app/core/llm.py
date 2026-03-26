@@ -3,12 +3,14 @@ import hashlib
 import json
 import logging
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from litellm import acompletion, completion
 from pydantic import BaseModel
 
 from app.core.settings import get_settings
+if TYPE_CHECKING:
+    from app.graph.state import AgentState
 
 
 logger = logging.getLogger(__name__)
@@ -198,7 +200,7 @@ async def ainvoke_llm(
     messages: list[dict[str, str]],
     response_format: type[BaseModel] | None = None,
     output_schema: type[BaseModel] | None = None,
-    agent_state: dict | None = None,
+    agent_state: "AgentState | None" = None,
     model_name: str | None = None,
     enable_prompt_cache: bool = False,
 ) -> str | BaseModel:
