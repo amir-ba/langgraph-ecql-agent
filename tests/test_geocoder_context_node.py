@@ -67,3 +67,49 @@ def test_geocoder_context_node_handles_multiple_predicates(monkeypatch):
     assert contexts[1]["geometry_type"] == "Point"
     assert isinstance(contexts[1]["bbox"], list)
     assert len(contexts[1]["bbox"]) == 4
+
+
+def test_geocoder_context_node_drops_germany_reference_when_explicit_bbox_present(monkeypatch):
+    class _FailingGeocoder:
+        async def forward_fulltext(self, query: str, max_results: int, epsg: int):
+            raise AssertionError("forward_fulltext should not be called")
+
+        async def suggest(self, query: str, max_results: int = 1):
+            raise AssertionError("suggest should not be called")
+
+    monkeypatch.setattr("app.graph.nodes.GeocoderClient", lambda **kwargs: _FailingGeocoder())
+
+    state = {
+        "spatial_reference": "Germany",
+        "explicit_bbox": [[7.0, 50.0, 7.5, 50.5]],
+        "spatial_filters": [{"predicate": "WITHIN"}],
+    }
+
+    updates = asyncio.run(geocoder_context_node(state))
+    contexts = updates.get("spatial_contexts")
+    assert isinstance(contexts, list)
+    assert len(contexts) == 1
+    assert contexts[0]["source"] == "explicit_bbox"
+
+
+def test_geocoder_context_node_drops_germany_reference_when_explicit_point_present(monkeypatch):
+    class _FailingGeocoder:
+        async def forward_fulltext(self, query: str, max_results: int, epsg: int):
+            raise AssertionError("forward_fulltext should not be called")
+
+        async def suggest(self, query: str, max_results: int = 1):
+            raise AssertionError("suggest should not be called")
+
+    monkeypatch.setattr("app.graph.nodes.GeocoderClient", lambda **kwargs: _FailingGeocoder())
+
+    state = {
+        "spatial_reference": "Germany",
+        "explicit_coordinates": [[7.2, 50.2]],
+        "spatial_filters": [{"predicate": "WITHIN"}],
+    }
+
+    updates = asyncio.run(geocoder_context_node(state))
+    contexts = updates.get("spatial_contexts")
+    assert isinstance(contexts, list)
+    assert len(contexts) == 1
+    assert contexts[0]["source"] == "explicit_point"

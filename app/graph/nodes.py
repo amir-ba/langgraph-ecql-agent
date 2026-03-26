@@ -239,7 +239,11 @@ async def geocoder_context_node(state: AgentState) -> dict[str, Any]:
             germany_ref = ref
             break
 
-    # If explicit bbox or coordinates exist, ignore 'Germany' reference
+    # If explicit geometry exists, ignore textual 'Germany' references.
+    if explicit_bboxes or explicit_coordinates:
+        spatial_references = [r for r in spatial_references if r.strip().lower() != "germany"]
+
+    # Build explicit geometry requests first.
     requests: list[tuple[str, Any]] = []
     for bbox in explicit_bboxes:
         requests.append(("bbox", bbox))
