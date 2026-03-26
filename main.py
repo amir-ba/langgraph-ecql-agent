@@ -66,10 +66,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="GeoServer ECQL Agent", version="0.1.0", lifespan=lifespan)
 
-# Phase 1 default: permissive CORS for local UI development.
+# Allow only Telekom Pages hosted frontends.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[],
+    allow_origin_regex=r"^https://([a-zA-Z0-9-]+\.)*pages\.devops\.telekom\.de$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
