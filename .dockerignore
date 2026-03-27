@@ -10,7 +10,6 @@ __pycache__
 .env
 .env.*
 *.log
-tests
 bash.sh
 request.json
 SYSTEM_DESIGN.md
