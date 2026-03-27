@@ -13,7 +13,7 @@ RUN python -m pip install --no-cache-dir uv
 
 # Copy dependency metadata first to maximize Docker layer caching.
 COPY pyproject.toml uv.lock ./
-RUN python -m uv sync --frozen --no-dev --no-install-project
+RUN python -m uv sync --frozen --no-install-project
 # run tests
 # Copy the FastAPI application source.
 COPY . .
