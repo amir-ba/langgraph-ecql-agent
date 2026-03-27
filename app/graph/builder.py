@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
+import inspect
 import logging
 from typing import Any, Literal, cast
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from app.graph.nodes import (
@@ -20,18 +22,23 @@ from app.graph.nodes import (
 )
 from app.graph.state import AgentState
 
-NodeFn = Callable[[AgentState], Awaitable[dict[str, Any]]]
+NodeFn = Callable[[AgentState, RunnableConfig], Awaitable[dict[str, Any]]]
 logger = logging.getLogger(__name__)
 
 
 def _with_node_logging(node_name: str, node_fn: NodeFn) -> NodeFn:
-    async def _wrapped(state: AgentState) -> dict[str, Any]:
+    _accepts_config = len(inspect.signature(node_fn).parameters) >= 2
+
+    async def _wrapped(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         logger.debug(
             "[graph] node_triggered=%s state_keys=%s",
             node_name,
             sorted(state.keys()),
         )
-        output = await node_fn(state)
+        if _accepts_config:
+            output = await node_fn(state, config)  # type: ignore[arg-type]
+        else:
+            output = await node_fn(state)  # type: ignore[call-arg]
         logger.debug(
             "[graph] node_completed=%s output_keys=%s",
             node_name,
@@ -42,10 +49,23 @@ def _with_node_logging(node_name: str, node_fn: NodeFn) -> NodeFn:
     return _wrapped
 
 
+def route_after_generator(state: AgentState) -> Literal["validator", "fallback"]:
+    ecql = str(state.get("generated_ecql") or "").strip()
+    if not ecql or ecql.upper() in {"NONE", "NULL"}:
+        return "fallback"
+    return "validator"
+
+
 def route_after_analysis(state: AgentState) -> Literal["geocoder", "end"]:
     if state.get("intent") == "spatial_query" and state.get("layer_subject"):
         return "geocoder"
     return "end"
+
+
+def route_after_geocoder(state: AgentState) -> Literal["discoverer", "fallback"]:
+    if state.get("validation_error"):
+        return "fallback"
+    return "discoverer"
 
 
 def validator_router(state: AgentState) -> Literal["generator", "fallback", "executor"]:
@@ -102,7 +122,14 @@ def build_graph(node_overrides: Mapping[str, NodeFn] | None = None):
         },
     )
 
-    builder.add_edge("geocoder", "discoverer")
+    builder.add_conditional_edges(
+        "geocoder",
+        route_after_geocoder,
+        {
+            "discoverer": "discoverer",
+            "fallback": "fallback",
+        },
+    )
     builder.add_edge("discoverer", "layer_selector")
     builder.add_conditional_edges(
         "layer_selector",
@@ -113,7 +140,14 @@ def build_graph(node_overrides: Mapping[str, NodeFn] | None = None):
         },
     )
     builder.add_edge("schema", "generator")
-    builder.add_edge("generator", "validator")
+    builder.add_conditional_edges(
+        "generator",
+        route_after_generator,
+        {
+            "validator": "validator",
+            "fallback": "fallback",
+        },
+    )
 
     builder.add_conditional_edges("validator", validator_router)
     builder.add_conditional_edges("executor", executor_router)

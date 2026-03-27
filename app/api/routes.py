@@ -62,14 +62,16 @@ async def spatial_chat(
     http_client_pool: HttpClientPool = Depends(get_http_client_pool),
 ) -> StreamingResponse:
     async def event_stream() -> AsyncIterator[str]:
-        inputs = build_initial_state(
-            payload.query,
-            geocoder_http_client=http_client_pool.geocoder,
-            wfs_http_client=http_client_pool.wfs,
-        )
+        inputs = build_initial_state(payload.query)
         latest_state: dict[str, Any] = dict(inputs)
         logger.debug("[spatial_chat] received query=%s thread_id=%s", payload.query, payload.thread_id)
-        config = {"configurable": {"thread_id": payload.thread_id}}
+        config = {
+            "configurable": {
+                "thread_id": payload.thread_id,
+                "geocoder_http_client": http_client_pool.geocoder,
+                "wfs_http_client": http_client_pool.wfs,
+            }
+        }
         yield _format_sse_event("status", {"thread_id": payload.thread_id, "status": "starting"})
 
         try:

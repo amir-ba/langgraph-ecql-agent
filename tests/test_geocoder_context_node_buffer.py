@@ -26,10 +26,19 @@ class DummyGeocoder:
         }
 
 def test_geocoder_context_node_city_matchlevel(monkeypatch):
-    # No explicit distance, should use city (10km)
     state = {
-        "spatial_reference": "Heidelberg",
-        "geocoder_http_client": None,
+        "spatial_targets": [
+            {"id": "r1", "kind": "spatial_reference", "value": "Heidelberg", "required": True}
+        ],
+        "spatial_predicates": [
+            {
+                "id": "p1",
+                "predicate": "INTERSECTS",
+                "target_ids": ["r1"],
+                "join_with_next": "AND",
+                "required": True,
+            }
+        ],
     }
     monkeypatch.setattr("app.graph.nodes.GeocoderClient", lambda **kwargs: DummyGeocoder())
     updates = asyncio.run(geocoder_context_node(state))
@@ -40,7 +49,6 @@ def test_geocoder_context_node_city_matchlevel(monkeypatch):
     assert context["geometry_type"] == "Polygon"
 
 def test_geocoder_context_node_fallback_default(monkeypatch):
-    # No explicit distance, no matchlevel, should use fallback (5km)
     class DummyGeocoderNoLevel:
         async def suggest(self, query: str, max_results: int = 1):
             return {
@@ -64,8 +72,18 @@ def test_geocoder_context_node_fallback_default(monkeypatch):
                 ]
             }
     state = {
-        "spatial_reference": "Heidelberg",
-        "geocoder_http_client": None,
+        "spatial_targets": [
+            {"id": "r1", "kind": "spatial_reference", "value": "Heidelberg", "required": True}
+        ],
+        "spatial_predicates": [
+            {
+                "id": "p1",
+                "predicate": "INTERSECTS",
+                "target_ids": ["r1"],
+                "join_with_next": "AND",
+                "required": True,
+            }
+        ],
     }
     monkeypatch.setattr("app.graph.nodes.GeocoderClient", lambda **kwargs: DummyGeocoderNoLevel())
     updates = asyncio.run(geocoder_context_node(state))

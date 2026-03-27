@@ -4,7 +4,9 @@ from app.graph.builder import (
     build_graph,
     executor_router,
     layer_selector_router,
+    route_after_geocoder,
     route_after_analysis,
+    route_after_generator,
     validator_router,
 )
 
@@ -13,6 +15,11 @@ def test_route_after_analysis_returns_expected_target() -> None:
     assert route_after_analysis({"intent": "spatial_query", "layer_subject": "hospitals"}) == "geocoder"
     assert route_after_analysis({"intent": "spatial_query", "layer_subject": None}) == "end"
     assert route_after_analysis({"intent": "irrelevant"}) == "end"
+
+
+def test_route_after_geocoder_handles_required_target_resolution_failures() -> None:
+    assert route_after_geocoder({"validation_error": None}) == "discoverer"
+    assert route_after_geocoder({"validation_error": "Required spatial targets could not be resolved: r1"}) == "fallback"
 
 
 def test_validator_router_handles_retry_and_fallback() -> None:
@@ -30,6 +37,23 @@ def test_executor_router_handles_retry_and_fallback() -> None:
     assert executor_router({"validation_error": "ows exception", "retry_count": 2}) == "generator"
     assert executor_router({"validation_error": "ows exception", "retry_count": 3}) == "fallback"
     assert executor_router({"validation_error": None, "retry_count": 1}) == "synthesizer"
+
+
+# Slice 5 — Guard empty ECQL → fallback
+def test_graph_routes_to_fallback_when_ecql_is_empty() -> None:
+    assert route_after_generator({"generated_ecql": ""}) == "fallback"
+    assert route_after_generator({"generated_ecql": "   "}) == "fallback"
+    assert route_after_generator({}) == "fallback"
+
+
+def test_graph_routes_to_fallback_when_ecql_is_none_string() -> None:
+    assert route_after_generator({"generated_ecql": "NONE"}) == "fallback"
+    assert route_after_generator({"generated_ecql": "none"}) == "fallback"
+    assert route_after_generator({"generated_ecql": "NULL"}) == "fallback"
+
+
+def test_graph_routes_to_validator_when_ecql_is_present() -> None:
+    assert route_after_generator({"generated_ecql": "PERSONS > 1000"}) == "validator"
 
 
 def test_build_graph_spatial_path_success() -> None:

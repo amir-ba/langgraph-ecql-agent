@@ -1,7 +1,5 @@
 from typing import Any, NotRequired, TypedDict
 
-import httpx
-
 
 class FinalResponsePayload(TypedDict, total=False):
     summary: str
@@ -13,14 +11,12 @@ class AgentState(TypedDict):
     intent: NotRequired[str]
     final_response: NotRequired[FinalResponsePayload | None]
 
-    spatial_reference: NotRequired[str | None]
-    spatial_filters: NotRequired[list[dict[str, Any] | None] | None]
+    spatial_targets: NotRequired[list[dict[str, Any]] | None]
+    spatial_predicates: NotRequired[list[dict[str, Any]] | None]
     layer_subject: NotRequired[str | None]
     attribute_hints: NotRequired[list[str]]
     spatial_contexts: NotRequired[list[dict[str, Any]] | None]
-    explicit_coordinates: NotRequired[list[float] | list[list[float]] | None]
-    explicit_bbox: NotRequired[list[float] | list[list[float]] | None]
-
+    unresolved_target_ids: NotRequired[list[str]]
     available_layers: NotRequired[list[dict[str, str]]]
     layer_catalog_markdown: NotRequired[str]
     retrieval_mode: NotRequired[str]
@@ -38,25 +34,20 @@ class AgentState(TypedDict):
     wfs_request_url: NotRequired[str]
     wfs_result: NotRequired[dict[str, Any]]
 
-    geocoder_http_client: NotRequired[httpx.AsyncClient]
-    wfs_http_client: NotRequired[httpx.AsyncClient]
-
     aggregate_usage: NotRequired[dict[str, int]]  # keys: prompt_tokens, completion_tokens, total_tokens, request_count
 
 
-def build_initial_state(
-    user_query: str,
-    geocoder_http_client: httpx.AsyncClient | None = None,
-    wfs_http_client: httpx.AsyncClient | None = None,
-) -> AgentState:
-    state = AgentState(
+def build_initial_state(user_query: str) -> AgentState:
+    return AgentState(
         user_query=user_query,
         intent="irrelevant",
         final_response=None,
-        spatial_reference=None,
+        spatial_targets=None,
+        spatial_predicates=None,
         layer_subject=None,
         attribute_hints=[],
         spatial_contexts=[],
+        unresolved_target_ids=[],
         retry_count=0,
         validation_error=None,
         aggregate_usage={
@@ -66,8 +57,3 @@ def build_initial_state(
             "request_count": 0,
         },
     )
-    if geocoder_http_client is not None:
-        state["geocoder_http_client"] = geocoder_http_client
-    if wfs_http_client is not None:
-        state["wfs_http_client"] = wfs_http_client
-    return state

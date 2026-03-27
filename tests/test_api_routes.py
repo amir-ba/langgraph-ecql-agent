@@ -70,7 +70,10 @@ def test_spatial_chat_streams_graph_updates_as_sse(monkeypatch) -> None:
     assert fake_graph.calls[0]["inputs"]["user_query"] == "Find hospitals in Berlin"
     assert fake_graph.calls[0]["inputs"]["retry_count"] == 0
     assert fake_graph.calls[0]["stream_mode"] == "updates"
-    assert fake_graph.calls[0]["config"] == {"configurable": {"thread_id": "123"}}
+    config = fake_graph.calls[0]["config"]
+    assert config["configurable"]["thread_id"] == "123"
+    assert "geocoder_http_client" in config["configurable"]
+    assert "wfs_http_client" in config["configurable"]
 
 
 def test_spatial_chat_requires_query_and_thread_id() -> None:

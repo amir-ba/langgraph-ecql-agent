@@ -26,11 +26,21 @@ class DummyGeocoder:
         }
 
 def test_geocoder_context_node_bbox_epsg3857(monkeypatch):
-    # Explicit user intent distance (e.g., 7km)
     state = {
-        "spatial_reference": "Heidelberg",
-        "spatial_filters": [{"predicate": "DWITHIN", "distance": 7, "units": "kilometers"}],
-        "geocoder_http_client": None,
+        "spatial_targets": [
+            {"id": "r1", "kind": "spatial_reference", "value": "Heidelberg", "required": True}
+        ],
+        "spatial_predicates": [
+            {
+                "id": "p1",
+                "predicate": "DWITHIN",
+                "target_ids": ["r1"],
+                "distance": 7,
+                "units": "kilometers",
+                "join_with_next": "AND",
+                "required": True,
+            }
+        ],
     }
     monkeypatch.setattr("app.graph.nodes.GeocoderClient", lambda **kwargs: DummyGeocoder())
     updates = asyncio.run(geocoder_context_node(state))

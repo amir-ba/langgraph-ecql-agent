@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+from functools import lru_cache
 from typing import Any, cast
 
 import httpx
+from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field
 from pyproj import Transformer
+from shapely import wkt as shapely_wkt
 from shapely.geometry import Point, box
 
 from app.core.llm import ainvoke_llm
@@ -28,6 +31,11 @@ from app.tools.layer_catalog import (
 
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=8)
+def _get_transformer(from_epsg: int, to_epsg: int) -> Transformer:
+    return Transformer.from_crs(from_epsg, to_epsg, always_xy=True)
 
 
 class LayerSelection(BaseModel):
@@ -61,79 +69,47 @@ def _distance_to_meters(distance: float, units: str) -> float | None:
     return distance * factor
 
 
-def _normalize_bbox(value: Any) -> list[float] | None:
-    if isinstance(value, list) and len(value) == 4:
-        try:
-            return [float(value[0]), float(value[1]), float(value[2]), float(value[3])]
-        except (TypeError, ValueError):
-            return None
-    return None
-
-
-def _normalize_bbox_list(value: Any) -> list[list[float]]:
-    if isinstance(value, list) and len(value) == 4:
-        normalized = _normalize_bbox(value)
-        return [normalized] if normalized is not None else []
-    if isinstance(value, list):
-        items: list[list[float]] = []
-        for entry in value:
-            normalized = _normalize_bbox(entry)
-            if normalized is not None:
-                items.append(normalized)
-        return items
-    return []
-
-
-def _normalize_coordinate_pair(value: Any) -> list[float] | None:
-    if isinstance(value, list) and len(value) == 2:
-        try:
-            return [float(value[0]), float(value[1])]
-        except (TypeError, ValueError):
-            return None
-    return None
-
-
-def _normalize_coordinate_list(value: Any) -> list[list[float]]:
-    if isinstance(value, list) and len(value) == 2:
-        normalized = _normalize_coordinate_pair(value)
-        return [normalized] if normalized is not None else []
-    if isinstance(value, list):
-        items: list[list[float]] = []
-        for entry in value:
-            normalized = _normalize_coordinate_pair(entry)
-            if normalized is not None:
-                items.append(normalized)
-        return items
-    return []
-
-
-def _normalize_spatial_references(value: Any) -> list[str]:
-    if isinstance(value, str):
-        return [value] if value.strip() else []
-    if isinstance(value, list):
-        return [str(entry) for entry in value if isinstance(entry, str) and entry.strip()]
-    return []
-
-
-def _normalize_spatial_filters(value: Any) -> list[dict[str, Any] | None]:
-    if isinstance(value, dict):
-        return [value]
-    if isinstance(value, list):
-        return [entry if isinstance(entry, dict) else None for entry in value]
-    return []
-
-
-def _align_spatial_filters(
-    filters: list[dict[str, Any] | None],
-    count: int,
-) -> list[dict[str, Any] | None]:
-    if count <= 0:
+def _normalize_spatial_targets(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
         return []
-    if not filters:
-        return [None for _ in range(count)]
-    if len(filters) >= count:
-        return filters[:count]
-    return filters + [None for _ in range(count - len(filters))]
+    return [entry for entry in value if isinstance(entry, dict)]
+
+
+def _normalize_spatial_predicates(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [entry for entry in value if isinstance(entry, dict)]
+
+
+def _distance_filter_for_target(
+    target_id: str,
+    spatial_predicates: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    candidates: list[dict[str, Any]] = []
+    for predicate in spatial_predicates:
+        predicate_name = str(predicate.get("predicate") or "").upper()
+        target_ids = predicate.get("target_ids")
+        distance = predicate.get("distance")
+        units = predicate.get("units")
+        if (
+            isinstance(target_ids, list)
+            and target_id in target_ids
+            and predicate_name in {"DWITHIN", "BEYOND"}
+            and isinstance(distance, int | float)
+            and isinstance(units, str)
+        ):
+            candidates.append({
+                "predicate": predicate_name,
+                "distance": float(distance),
+                "units": units,
+            })
+    if not candidates:
+        return None
+    # Use the largest distance to size the pre-filter bbox conservatively.
+    return max(
+        candidates,
+        key=lambda c: _distance_to_meters(c["distance"], c["units"]) or 0.0,
+    )
 
 
 def _extract_srid(crs: str) -> int | None:
@@ -153,7 +129,7 @@ def _to_ewkt(wkt: str, crs: str) -> str:
 
 
 
-async def unified_router_analyzer_node(state: AgentState) -> dict[str, Any]:
+async def unified_router_analyzer_node(state: AgentState, config: RunnableConfig | None = None) -> dict[str, Any]:
     user_query = state.get("user_query", "")
     logger.debug("[unified_router_analyzer_node] input user_query=%s", user_query)
     settings = get_settings()
@@ -164,7 +140,9 @@ async def unified_router_analyzer_node(state: AgentState) -> dict[str, Any]:
             "content": (
                 "You are a geospatial AI assistant. Determine if the user is asking "
                 "for spatial data or just chatting. If spatial, extract the location, "
-                "target features (layer subject), spatial relationship, and attributes. "
+                "target features (layer subject), id-bound spatial_targets, "
+                "id-bound spatial_predicates, explicit WKT geometries "
+                "(POINT/LINESTRING/POLYGON), and attributes. "
                 "Current location is Germany. Current year is 2026."
             ),
         },
@@ -190,21 +168,20 @@ async def unified_router_analyzer_node(state: AgentState) -> dict[str, Any]:
             summary = "I can help with spatial queries against available map layers."
         final_payload = _build_final_response(summary=summary)
 
-    spatial_filters_payload = None
-    if result.spatial_filters:
-        spatial_filters_payload = [
-            spatial_filter.model_dump(exclude_none=True)
-            for spatial_filter in result.spatial_filters
-            if spatial_filter is not None
-        ]
+    spatial_targets_payload = [
+        target.model_dump(exclude_none=True)
+        for target in (result.spatial_targets or [])
+    ]
+    spatial_predicates_payload = [
+        predicate.model_dump(exclude_none=True)
+        for predicate in (result.spatial_predicates or [])
+    ]
 
     output = {
         "intent": result.intent,
         "final_response": final_payload,
-        "spatial_reference": result.spatial_reference,
-        "explicit_coordinates": result.explicit_coordinates,
-        "explicit_bbox": _normalize_bbox(result.explicit_bbox),
-        "spatial_filters": spatial_filters_payload,
+        "spatial_targets": spatial_targets_payload,
+        "spatial_predicates": spatial_predicates_payload,
         "layer_subject": result.layer_subject,
         "attribute_hints": result.attribute_hints or [],
     }
@@ -212,103 +189,131 @@ async def unified_router_analyzer_node(state: AgentState) -> dict[str, Any]:
     return output
 
 
-async def geocoder_context_node(state: AgentState) -> dict[str, Any]:
-    spatial_references = _normalize_spatial_references(state.get("spatial_reference"))
-    explicit_bboxes = _normalize_bbox_list(state.get("explicit_bbox"))
-    explicit_coordinates = _normalize_coordinate_list(state.get("explicit_coordinates"))
-    spatial_filters = _normalize_spatial_filters(state.get("spatial_filters"))
+async def geocoder_context_node(state: AgentState, config: RunnableConfig | None = None) -> dict[str, Any]:
+    spatial_targets = _normalize_spatial_targets(state.get("spatial_targets"))
+    spatial_predicates = _normalize_spatial_predicates(state.get("spatial_predicates"))
 
     logger.debug(
-        "[geocoder_context_node] input references=%s explicit_bboxes=%s explicit_coordinates=%s",
-        spatial_references,
-        len(explicit_bboxes),
-        len(explicit_coordinates),
+        "[geocoder_context_node] input targets=%s predicates=%s",
+        len(spatial_targets),
+        len(spatial_predicates),
     )
 
-    # Check for 'Germany' reference (case-insensitive)
-    germany_bbox = [5.86632, 47.27011, 15.04193, 55.09916]
-    germany_ref = None
-    for ref in spatial_references:
-        if ref.strip().lower() == "germany":
-            germany_ref = ref
-            break
-
-    # If explicit geometry exists, ignore textual 'Germany' references.
-    if explicit_bboxes or explicit_coordinates:
-        spatial_references = [r for r in spatial_references if r.strip().lower() != "germany"]
-
-    # Build explicit geometry requests first.
-    requests: list[tuple[str, Any]] = []
-    for bbox in explicit_bboxes:
-        requests.append(("bbox", bbox))
-    for coord in explicit_coordinates:
-        requests.append(("point", coord))
-
-    # Only use 'Germany' bbox as fallback if no explicit bbox/coordinates
-    if not requests and germany_ref:
-        requests.append(("bbox", germany_bbox))
-        spatial_references = [r for r in spatial_references if r.strip().lower() != "germany"]
-
-    # Add remaining spatial references (excluding 'Germany' if fallback used)
-    for reference in spatial_references:
-        requests.append(("reference", reference))
-
-    if not requests:
+    if not spatial_targets:
         output = {"spatial_contexts": []}
         logger.debug("[geocoder_context_node] output=%s", _as_json(output))
         return output
 
-    aligned_filters = _align_spatial_filters(spatial_filters, len(requests))
     contexts: list[dict[str, Any]] = []
+    unresolved_target_ids: list[str] = []
 
-    geocoder_http_client = cast(httpx.AsyncClient | None, state.get("geocoder_http_client"))
+    configurable = (config or {}).get("configurable") or {}
+    geocoder_http_client = cast(httpx.AsyncClient | None, configurable.get("geocoder_http_client"))
     geocoder = GeocoderClient(http_client=geocoder_http_client)
 
-    for (kind, value), spatial_filter in zip(requests, aligned_filters):
-        if kind == "bbox":
-            min_x, min_y, max_x, max_y = value
-            crs = "EPSG:4326"
-            wkt_polygon = (
-                f"POLYGON(({min_x} {min_y}, {min_x} {max_y}, "
-                f"{max_x} {max_y}, {max_x} {min_y}, {min_x} {min_y}))"
-            )
-            contexts.append(
-                {
-                    "source": "explicit_bbox" if value != germany_bbox else "fallback_germany_bbox",
-                    "crs": crs,
-                    "bbox": [min_x, min_y, max_x, max_y],
-                    "geometry_wkt": _to_ewkt(wkt_polygon, crs),
-                    "geometry_type": "Polygon",
-                }
-            )
+    for target in spatial_targets:
+        target_id = str(target.get("id") or "").strip()
+        target_kind = str(target.get("kind") or "").strip().lower()
+        target_value = str(target.get("value") or "").strip()
+        required = bool(target.get("required", True))
+
+        if not target_id or not target_kind or not target_value:
+            if required and target_id:
+                unresolved_target_ids.append(target_id)
             continue
 
-        if kind == "point":
-            lon, lat = value
-            crs = "EPSG:4326"
-            bbox = _build_bbox_for_point(lon, lat, spatial_filter)
-            contexts.append(
-                {
-                    "source": "explicit_point",
-                    "crs": crs,
-                    "bbox": bbox,
-                    "geometry_wkt": _to_ewkt(f"POINT({lon} {lat})", crs),
-                    "geometry_type": "Point",
-                }
-            )
+        distance_filter = _distance_filter_for_target(target_id, spatial_predicates)
+
+        context: dict[str, Any] | None = None
+        if target_kind == "explicit_geometry":
+            context = _build_explicit_geometry_context(target_id, target_value, distance_filter)
+        elif target_kind == "spatial_reference":
+            context = await _resolve_reference_context(target_id, target_value, distance_filter, geocoder)
+
+        if context is None:
+            if required:
+                unresolved_target_ids.append(target_id)
             continue
+        contexts.append(context)
 
-        if kind == "reference":
-            context = await _resolve_reference_context(str(value), spatial_filter, geocoder)
-            if context is None:
-                output = {"spatial_contexts": []}
-                logger.debug("[geocoder_context_node] output=%s", _as_json(output))
-                return output
-            contexts.append(context)
+    resolved_target_ids = {str(context.get("target_id") or "") for context in contexts}
+    filtered_predicates: list[dict[str, Any]] = []
+    for predicate in spatial_predicates:
+        target_ids = predicate.get("target_ids")
+        if not isinstance(target_ids, list):
+            continue
+        resolved_ids = [
+            str(target_id)
+            for target_id in target_ids
+            if isinstance(target_id, str) and target_id in resolved_target_ids
+        ]
+        if not resolved_ids:
+            if bool(predicate.get("required", True)):
+                unresolved_target_ids.extend(
+                    [str(target_id) for target_id in target_ids if isinstance(target_id, str)]
+                )
+            continue
+        next_predicate = dict(predicate)
+        next_predicate["target_ids"] = resolved_ids
+        filtered_predicates.append(next_predicate)
 
-    output: dict[str, Any] = {"spatial_contexts": contexts}
+    if unresolved_target_ids:
+        unresolved_unique = sorted({target_id for target_id in unresolved_target_ids if target_id})
+        output: dict[str, Any] = {
+            "spatial_contexts": contexts,
+            "spatial_predicates": filtered_predicates,
+            "unresolved_target_ids": unresolved_unique,
+            "validation_error": "Required spatial targets could not be resolved: " + ", ".join(unresolved_unique),
+        }
+        logger.debug("[geocoder_context_node] output=%s", _as_json(output))
+        return output
+
+    output = {
+        "spatial_contexts": contexts,
+        "spatial_predicates": filtered_predicates,
+        "unresolved_target_ids": [],
+        "validation_error": None,
+    }
     logger.debug("[geocoder_context_node] output=%s", _as_json(output))
     return output
+
+
+def _build_explicit_geometry_context(
+    target_id: str,
+    geometry_wkt: str,
+    spatial_filter: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not geometry_wkt:
+        return None
+
+    try:
+        geom = shapely_wkt.loads(geometry_wkt)
+    except Exception:
+        return None
+
+    crs = "EPSG:4326"
+    geometry_type = str(getattr(geom, "geom_type", "") or "")
+    if not geometry_type:
+        return None
+
+    if geometry_type == "Point":
+        coords = list(geom.coords)
+        if not coords:
+            return None
+        lon, lat = float(coords[0][0]), float(coords[0][1])
+        bbox = _build_bbox_for_point(lon, lat, spatial_filter)
+    else:
+        min_x, min_y, max_x, max_y = geom.bounds
+        bbox = [float(min_x), float(min_y), float(max_x), float(max_y)]
+
+    return {
+        "target_id": target_id,
+        "source": "explicit_geometry",
+        "crs": crs,
+        "bbox": bbox,
+        "geometry_wkt": _to_ewkt(geom.wkt, crs),
+        "geometry_type": geometry_type,
+    }
 
 
 def _build_bbox_for_point(
@@ -328,8 +333,8 @@ def _build_bbox_for_point(
         epsilon = 0.0001
         return [lon - epsilon, lat - epsilon, lon + epsilon, lat + epsilon]
 
-    transformer_to_3857 = Transformer.from_crs(4326, 3857, always_xy=True)
-    transformer_to_4326 = Transformer.from_crs(3857, 4326, always_xy=True)
+    transformer_to_3857 = _get_transformer(4326, 3857)
+    transformer_to_4326 = _get_transformer(3857, 4326)
     x, y = transformer_to_3857.transform(lon, lat)
     minx = x - buffer_m
     maxx = x + buffer_m
@@ -341,6 +346,7 @@ def _build_bbox_for_point(
 
 
 async def _resolve_reference_context(
+    target_id: str,
     query: str,
     spatial_filter: dict[str, Any] | None,
     geocoder: GeocoderClient,
@@ -392,8 +398,8 @@ async def _resolve_reference_context(
         buffer_m = 5000
     logger.info("[geocoder_context_node] buffer_m=%s", buffer_m)
 
-    transformer_to_3857 = Transformer.from_crs(4326, 3857, always_xy=True)
-    transformer_to_4326 = Transformer.from_crs(3857, 4326, always_xy=True)
+    transformer_to_3857 = _get_transformer(4326, 3857)
+    transformer_to_4326 = _get_transformer(3857, 4326)
     x, y = transformer_to_3857.transform(lon, lat)
 
     minx = x - buffer_m
@@ -416,6 +422,7 @@ async def _resolve_reference_context(
     crs = "EPSG:4326"
 
     return {
+        "target_id": target_id,
         "source": "reference",
         "crs": crs,
         "bbox": bbox_4326,
@@ -424,10 +431,11 @@ async def _resolve_reference_context(
     }
 
 
-async def wfs_discovery_node(state: AgentState) -> dict[str, list[dict[str, str]] | str | None]:
+async def wfs_discovery_node(state: AgentState, config: RunnableConfig | None = None) -> dict[str, list[dict[str, str]] | str | None]:
     logger.debug("[wfs_discovery_node] input received")
     settings = get_settings()
-    wfs_http_client = cast(httpx.AsyncClient | None, state.get("wfs_http_client"))
+    configurable = (config or {}).get("configurable") or {}
+    wfs_http_client = cast(httpx.AsyncClient | None, configurable.get("wfs_http_client"))
     layers = await discover_layers(
         wfs_url=settings.geoserver_wfs_url,
         http_client=wfs_http_client,
@@ -462,7 +470,7 @@ async def wfs_discovery_node(state: AgentState) -> dict[str, list[dict[str, str]
     return output
 
 
-async def layer_discoverer_node(state: AgentState) -> dict[str, Any]:
+async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None = None) -> dict[str, Any]:
     available_layers = state.get("available_layers", [])
     layer_subject = state.get("layer_subject")
     logger.debug(
@@ -555,7 +563,7 @@ async def layer_discoverer_node(state: AgentState) -> dict[str, Any]:
     return output
 
 
-async def schema_extractor_node(state: AgentState) -> dict[str, Any]:
+async def schema_extractor_node(state: AgentState, config: RunnableConfig | None = None) -> dict[str, Any]:
     selected_layer = state.get("selected_layer", "")
     logger.debug("[schema_extractor_node] input selected_layer=%s", selected_layer)
     if not selected_layer:
@@ -568,7 +576,8 @@ async def schema_extractor_node(state: AgentState) -> dict[str, Any]:
         return output
 
     settings = get_settings()
-    wfs_http_client = cast(httpx.AsyncClient | None, state.get("wfs_http_client"))
+    configurable = (config or {}).get("configurable") or {}
+    wfs_http_client = cast(httpx.AsyncClient | None, configurable.get("wfs_http_client"))
     attributes, geometry_column = await get_layer_schema(
         wfs_url=settings.geoserver_wfs_url,
         type_name=selected_layer,
@@ -586,18 +595,18 @@ async def schema_extractor_node(state: AgentState) -> dict[str, Any]:
     return output
 
 
-async def ecql_generator_node(state: AgentState) -> dict[str, str | int]:
+async def ecql_generator_node(state: AgentState, config: RunnableConfig | None = None) -> dict[str, str | int]:
     logger.debug(
         "[ecql_generator_node] input user_query=%s retry_count=%s",
         state.get("user_query", ""),
         state.get("retry_count", 0),
     )
     spatial_contexts = state.get("spatial_contexts")
-    spatial_filters = state.get("spatial_filters")
+    spatial_predicates = state.get("spatial_predicates")
     spatial_ecql = build_spatial_ecql(
         geom_column=state.get("geometry_column", ""),
         spatial_contexts=cast(list[dict[str, Any]] | None, spatial_contexts),
-        spatial_filters=cast(list[dict[str, Any] | None] | None, spatial_filters),
+        spatial_predicates=cast(list[dict[str, Any]] | None, spatial_predicates),
     )
 
     messages = [
@@ -653,7 +662,7 @@ async def ecql_generator_node(state: AgentState) -> dict[str, str | int]:
     return output
 
 
-async def ecql_validation_node(state: AgentState) -> dict[str, str | None]:
+async def ecql_validation_node(state: AgentState, config: RunnableConfig | None = None) -> dict[str, str | None]:
     logger.debug(
         "[ecql_validation_node] input generated_ecql=%s geometry_column=%s",
         state.get("generated_ecql", ""),
@@ -682,7 +691,7 @@ async def ecql_validation_node(state: AgentState) -> dict[str, str | None]:
     return output
 
 
-async def wfs_executor_node(state: AgentState) -> dict[str, Any]:
+async def wfs_executor_node(state: AgentState, config: RunnableConfig | None = None) -> dict[str, Any]:
     selected_layer = state.get("selected_layer", "")
     generated_ecql = state.get("generated_ecql", "")
     logger.debug(
@@ -699,7 +708,8 @@ async def wfs_executor_node(state: AgentState) -> dict[str, Any]:
 
     settings = get_settings()
     wfs_url = settings.geoserver_wfs_url
-    wfs_http_client = cast(httpx.AsyncClient | None, state.get("wfs_http_client"))
+    configurable = (config or {}).get("configurable") or {}
+    wfs_http_client = cast(httpx.AsyncClient | None, configurable.get("wfs_http_client"))
     username = settings.geoserver_wfs_username
     password = settings.geoserver_wfs_password
     srs_name = settings.geoserver_wfs_srs_name
@@ -743,7 +753,7 @@ async def wfs_executor_node(state: AgentState) -> dict[str, Any]:
     return output
 
 
-async def fallback_node(state: AgentState) -> dict[str, FinalResponsePayload]:
+async def fallback_node(state: AgentState, config: RunnableConfig | None = None) -> dict[str, FinalResponsePayload]:
     error = state.get("validation_error") or "Unknown processing error"
     logger.debug("[fallback_node] input validation_error=%s", error)
     if "Low-confidence layer retrieval" in str(error):
@@ -770,7 +780,7 @@ async def fallback_node(state: AgentState) -> dict[str, FinalResponsePayload]:
     return output
 
 
-async def synthesizer_node(state: AgentState) -> dict[str, FinalResponsePayload]:
+async def synthesizer_node(state: AgentState, config: RunnableConfig | None = None) -> dict[str, FinalResponsePayload]:
     wfs_result = state.get("wfs_result", {})
     features = wfs_result.get("features") if isinstance(wfs_result, dict) else None
     # geojson is now communicated in the wfs_executor_node message

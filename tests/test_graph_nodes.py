@@ -1,6 +1,15 @@
+"""Graph node tests.
+
+Migration note: analyzed intent now uses non-backward-compatible id-bound
+spatial_targets and spatial_predicates only.
+"""
+
 import asyncio
 
-from app.core.schemas import AnalyzedIntent, ECQLGeneration, SpatialFilterDef
+import pytest
+from pydantic import ValidationError
+
+from app.core.schemas import AnalyzedIntent, ECQLGeneration, SpatialPredicateBindingDef, SpatialTargetDef
 from app.graph.nodes import (
     ecql_generator_node,
     geocoder_context_node,
@@ -20,11 +29,12 @@ def test_build_initial_state_sets_defaults() -> None:
     assert state["user_query"] == "find parks in berlin"
     assert state["intent"] == "irrelevant"
     assert state["final_response"] is None
-    assert state["spatial_reference"] is None
-    assert state.get("spatial_filters") is None
+    assert state["spatial_targets"] is None
+    assert state["spatial_predicates"] is None
     assert state["layer_subject"] is None
     assert state["attribute_hints"] == []
     assert state["spatial_contexts"] == []
+    assert state["unresolved_target_ids"] == []
     assert state["retry_count"] == 0
     assert state["validation_error"] is None
     assert state["aggregate_usage"] == {
@@ -39,10 +49,28 @@ def test_unified_router_analyzer_node_returns_spatial_entities(monkeypatch) -> N
     parsed_intent = AnalyzedIntent(
         intent="spatial_query",
         general_response=None,
-        spatial_reference="Bonn",
-        spatial_filters=[SpatialFilterDef(predicate="DWITHIN", distance=5, units="kilometers")],
         layer_subject="schools",
         attribute_hints=["capacity > 100"],
+        spatial_targets=[
+            {
+                "id": "r1",
+                "kind": "spatial_reference",
+                "value": "Bonn",
+                "role": "primary_area",
+                "required": True,
+            }
+        ],
+        spatial_predicates=[
+            {
+                "id": "p1",
+                "predicate": "DWITHIN",
+                "target_ids": ["r1"],
+                "distance": 5,
+                "units": "kilometers",
+                "join_with_next": "AND",
+                "required": True,
+            }
+        ],
     )
 
     async def fake_ainvoke_llm(
@@ -65,14 +93,24 @@ def test_unified_router_analyzer_node_returns_spatial_entities(monkeypatch) -> N
     assert updates == {
         "intent": "spatial_query",
         "final_response": None,
-        "spatial_reference": "Bonn",
-        "explicit_coordinates": None,
-        "explicit_bbox": None,
-        "spatial_filters": [
+        "spatial_targets": [
             {
+                "id": "r1",
+                "kind": "spatial_reference",
+                "value": "Bonn",
+                "role": "primary_area",
+                "required": True,
+            }
+        ],
+        "spatial_predicates": [
+            {
+                "id": "p1",
                 "predicate": "DWITHIN",
+                "target_ids": ["r1"],
                 "distance": 5.0,
                 "units": "kilometers",
+                "join_with_next": "AND",
+                "required": True,
             }
         ],
         "layer_subject": "schools",
@@ -80,14 +118,141 @@ def test_unified_router_analyzer_node_returns_spatial_entities(monkeypatch) -> N
     }
 
 
+def test_analyzed_intent_accepts_spatial_targets_and_predicates() -> None:
+    parsed = AnalyzedIntent.model_validate(
+        {
+            "intent": "spatial_query",
+            "spatial_targets": [
+                {
+                    "id": "g1",
+                    "kind": "explicit_geometry",
+                    "value": "POINT(7.1 50.7)",
+                    "role": "primary_area",
+                    "required": True,
+                },
+                {
+                    "id": "r1",
+                    "kind": "spatial_reference",
+                    "value": "Bonn",
+                    "role": "secondary_area",
+                    "required": True,
+                },
+            ],
+            "spatial_predicates": [
+                {
+                    "id": "p1",
+                    "predicate": "INTERSECTS",
+                    "target_ids": ["g1"],
+                    "join_with_next": "AND",
+                    "required": True,
+                },
+                {
+                    "id": "p2",
+                    "predicate": "DWITHIN",
+                    "target_ids": ["g1", "r1"],
+                    "distance": 5,
+                    "units": "kilometers",
+                    "join_with_next": "AND",
+                    "required": True,
+                },
+            ],
+        }
+    )
+
+    # RED expectation for new schema fields: they must be materialized, not ignored.
+    assert parsed.spatial_targets is not None
+    assert [target.id for target in parsed.spatial_targets] == ["g1", "r1"]
+    assert parsed.spatial_predicates is not None
+    assert [predicate.id for predicate in parsed.spatial_predicates] == ["p1", "p2"]
+
+
+def test_analyzed_intent_rejects_legacy_fields() -> None:
+    try:
+        AnalyzedIntent.model_validate(
+            {
+                "intent": "spatial_query",
+                "layer_subject": "hospitals",
+                "spatial_reference": "Bonn",
+            }
+        )
+    except Exception:
+        pass
+    else:
+        raise AssertionError("Legacy fields must be rejected in non-backward-compatible API")
+
+
+# ---------------------------------------------------------------------------
+# Slice 1 — Schema cross-field validators
+# ---------------------------------------------------------------------------
+
+def test_analyzed_intent_rejects_dwithin_without_distance() -> None:
+    with pytest.raises(ValidationError):
+        SpatialPredicateBindingDef(
+            id="p1",
+            predicate="DWITHIN",
+            target_ids=["r1"],
+            distance=None,
+            units="meters",
+        )
+
+
+def test_analyzed_intent_rejects_dwithin_without_units() -> None:
+    with pytest.raises(ValidationError):
+        SpatialPredicateBindingDef(
+            id="p1",
+            predicate="DWITHIN",
+            target_ids=["r1"],
+            distance=100.0,
+            units=None,
+        )
+
+
+def test_analyzed_intent_rejects_dwithin_with_zero_distance() -> None:
+    with pytest.raises(ValidationError):
+        SpatialPredicateBindingDef(
+            id="p1",
+            predicate="DWITHIN",
+            target_ids=["r1"],
+            distance=0.0,
+            units="meters",
+        )
+
+
+def test_analyzed_intent_rejects_predicate_with_empty_target_ids() -> None:
+    with pytest.raises(ValidationError):
+        SpatialPredicateBindingDef(
+            id="p1",
+            predicate="INTERSECTS",
+            target_ids=[],
+        )
+
+
+def test_analyzed_intent_rejects_blank_target_id() -> None:
+    with pytest.raises(ValidationError):
+        SpatialTargetDef(
+            id="   ",
+            kind="spatial_reference",
+            value="Berlin",
+        )
+
+
+def test_analyzed_intent_rejects_blank_predicate_id() -> None:
+    with pytest.raises(ValidationError):
+        SpatialPredicateBindingDef(
+            id="",
+            predicate="INTERSECTS",
+            target_ids=["r1"],
+        )
+
+
 def test_unified_router_analyzer_node_returns_irrelevant_response(monkeypatch) -> None:
     parsed_intent = AnalyzedIntent(
         intent="irrelevant",
         general_response="Hello! How can I help with geospatial analysis today?",
-        spatial_reference=None,
-        spatial_filters=None,
         layer_subject=None,
         attribute_hints=None,
+        spatial_targets=[],
+        spatial_predicates=[],
     )
 
     async def fake_ainvoke_llm(
@@ -111,10 +276,8 @@ def test_unified_router_analyzer_node_returns_irrelevant_response(monkeypatch) -
         "final_response": {
             "summary": "Hello! How can I help with geospatial analysis today?"
         },
-        "spatial_reference": None,
-        "explicit_coordinates": None,
-        "explicit_bbox": None,
-        "spatial_filters": None,
+        "spatial_targets": [],
+        "spatial_predicates": [],
         "layer_subject": None,
         "attribute_hints": [],
     }
@@ -133,13 +296,117 @@ def test_geocoder_context_node_uses_deterministic_geocoder(monkeypatch) -> None:
 
     monkeypatch.setattr("app.graph.nodes.GeocoderClient", lambda **kwargs: _Geocoder())
 
-    updates = asyncio.run(geocoder_context_node({"spatial_reference": "Berlin"}))
+    updates = asyncio.run(
+        geocoder_context_node(
+            {
+                "spatial_targets": [
+                    {
+                        "id": "r1",
+                        "kind": "spatial_reference",
+                        "value": "Berlin",
+                        "required": True,
+                    }
+                ],
+                "spatial_predicates": [
+                    {
+                        "id": "p1",
+                        "predicate": "INTERSECTS",
+                        "target_ids": ["r1"],
+                        "join_with_next": "AND",
+                        "required": True,
+                    }
+                ],
+            }
+        )
+    )
 
     context = updates["spatial_contexts"][0]
     assert isinstance(context["bbox"], list)
     assert len(context["bbox"]) == 4
     assert context["crs"] == "EPSG:4326"
     assert context["geometry_type"] == "Polygon"
+
+
+def test_geocoder_context_node_resolves_id_bound_targets_and_filters_optional_unresolved(monkeypatch) -> None:
+    class _Geocoder:
+        async def forward_fulltext(self, query: str, max_results: int, epsg: int):
+            if query == "Berlin":
+                return {"Result": [{"Coordinate": "52.5200,13.4050", "Name": "Berlin"}]}
+            return {"Result": []}
+
+        async def suggest(self, query: str, max_results: int = 1):
+            if query == "Berlin":
+                return {"SuggestResult": [{"id": "1", "locationType": "City", "label": query, "score": 1.0}]}
+            return {"SuggestResult": []}
+
+    monkeypatch.setattr("app.graph.nodes.GeocoderClient", lambda **kwargs: _Geocoder())
+
+    updates = asyncio.run(
+        geocoder_context_node(
+            {
+                "spatial_targets": [
+                    {"id": "r1", "kind": "spatial_reference", "value": "Berlin", "required": True},
+                    {"id": "r2", "kind": "spatial_reference", "value": "Nowhere", "required": False},
+                ],
+                "spatial_predicates": [
+                    {
+                        "id": "p1",
+                        "predicate": "INTERSECTS",
+                        "target_ids": ["r1"],
+                        "join_with_next": "AND",
+                        "required": True,
+                    },
+                    {
+                        "id": "p2",
+                        "predicate": "DWITHIN",
+                        "target_ids": ["r2"],
+                        "distance": 1,
+                        "units": "kilometers",
+                        "join_with_next": "AND",
+                        "required": False,
+                    },
+                ],
+            }
+        )
+    )
+
+    assert updates["validation_error"] is None
+    assert len(updates["spatial_contexts"]) == 1
+    assert updates["spatial_contexts"][0]["target_id"] == "r1"
+    assert [p["id"] for p in updates["spatial_predicates"]] == ["p1"]
+
+
+def test_geocoder_context_node_returns_validation_error_for_required_unresolved_target(monkeypatch) -> None:
+    class _Geocoder:
+        async def forward_fulltext(self, query: str, max_results: int, epsg: int):
+            return {"Result": []}
+
+        async def suggest(self, query: str, max_results: int = 1):
+            return {"SuggestResult": []}
+
+    monkeypatch.setattr("app.graph.nodes.GeocoderClient", lambda **kwargs: _Geocoder())
+
+    updates = asyncio.run(
+        geocoder_context_node(
+            {
+                "spatial_targets": [
+                    {"id": "r1", "kind": "spatial_reference", "value": "Unknown Place", "required": True},
+                ],
+                "spatial_predicates": [
+                    {
+                        "id": "p1",
+                        "predicate": "INTERSECTS",
+                        "target_ids": ["r1"],
+                        "join_with_next": "AND",
+                        "required": True,
+                    }
+                ],
+            }
+        )
+    )
+
+    assert updates["validation_error"] is not None
+    assert "r1" in updates["validation_error"]
 
 
 def test_layer_discoverer_node_selects_layer(monkeypatch) -> None:
@@ -391,13 +658,22 @@ def test_ecql_generator_node_increments_retry_and_returns_ecql(monkeypatch) -> N
             "geometry_column": "the_geom",
             "spatial_contexts": [
                 {
+                    "target_id": "g1",
                     "crs": "EPSG:4326",
                     "bbox": [-10, -10, 10, 10],
                     "geometry_wkt": "POLYGON ((-10 -10, 10 -10, 10 10, -10 10, -10 -10))",
                     "geometry_type": "Polygon",
                 },
             ],
-            "spatial_filters": [{"predicate": "INTERSECTS"}],
+            "spatial_predicates": [
+                {
+                    "id": "p1",
+                    "predicate": "INTERSECTS",
+                    "target_ids": ["g1"],
+                    "join_with_next": "AND",
+                    "required": True,
+                }
+            ],
             "attribute_hints": ["capacity > 100"],
             "validation_error": "Unknown attribute",
             "retry_count": 1,
@@ -423,6 +699,7 @@ def test_ecql_generator_node_builds_multi_spatial_ecql(monkeypatch) -> None:
             "geometry_column": "the_geom",
             "spatial_contexts": [
                 {
+                    "target_id": "g1",
                     "crs": "EPSG:4326",
                     "bbox": [7.0, 50.0, 7.5, 50.5],
                     "geometry_wkt": (
@@ -431,15 +708,30 @@ def test_ecql_generator_node_builds_multi_spatial_ecql(monkeypatch) -> None:
                     "geometry_type": "Polygon",
                 },
                 {
+                    "target_id": "g2",
                     "crs": "EPSG:4326",
                     "bbox": [7.19, 50.19, 7.21, 50.21],
                     "geometry_wkt": "POINT (7.2 50.2)",
                     "geometry_type": "Point",
                 },
             ],
-            "spatial_filters": [
-                None,
-                {"predicate": "DWITHIN", "distance": 100, "units": "meters"},
+            "spatial_predicates": [
+                {
+                    "id": "p1",
+                    "predicate": "INTERSECTS",
+                    "target_ids": ["g1"],
+                    "join_with_next": "AND",
+                    "required": True,
+                },
+                {
+                    "id": "p2",
+                    "predicate": "DWITHIN",
+                    "target_ids": ["g2"],
+                    "distance": 100,
+                    "units": "meters",
+                    "join_with_next": "AND",
+                    "required": True,
+                },
             ],
             "attribute_hints": [],
             "validation_error": None,
@@ -447,7 +739,7 @@ def test_ecql_generator_node_builds_multi_spatial_ecql(monkeypatch) -> None:
         }
     ))
 
-    assert "BBOX(the_geom, 7.0, 50.0, 7.5, 50.5, 'EPSG:4326')" in updates["generated_ecql"]
+    assert "INTERSECTS(the_geom, SRID=4326;POLYGON" in updates["generated_ecql"]
     assert "DWITHIN(the_geom, SRID=4326;POINT (7.2 50.2), 100, meters)" in updates["generated_ecql"]
     assert "PERSONS > 1000" in updates["generated_ecql"]
 
@@ -460,6 +752,7 @@ def test_ecql_generator_node_avoids_duplicate_bbox_for_duplicated_reference_cont
     monkeypatch.setattr("app.graph.nodes.ainvoke_llm", fake_ainvoke_llm)
 
     hamburg_context = {
+        "target_id": "r1",
         "source": "reference",
         "crs": "EPSG:4326",
         "bbox": [9.621463608102793, 53.303866335746676, 10.519778892222314, 53.837305712419166],
@@ -479,7 +772,15 @@ def test_ecql_generator_node_avoids_duplicate_bbox_for_duplicated_reference_cont
             "layer_schema": {"manager": "xsd:string"},
             "geometry_column": "wkb_geometry",
             "spatial_contexts": [hamburg_context],
-            "spatial_filters": [{"predicate": "INTERSECTS"}],
+            "spatial_predicates": [
+                {
+                    "id": "p1",
+                    "predicate": "INTERSECTS",
+                    "target_ids": ["r1"],
+                    "join_with_next": "AND",
+                    "required": True,
+                }
+            ],
             "attribute_hints": ["manager = 'NBG-Maps'"],
             "validation_error": None,
             "retry_count": 0,
@@ -596,7 +897,79 @@ def test_wfs_executor_node_returns_wfs_result(monkeypatch) -> None:
     assert updates["wfs_result"]["type"] == "FeatureCollection"
 
 
-def test_geocoder_context_node_no_spatial_reference_returns_empty_context() -> None:
+def test_geocoder_context_node_no_spatial_targets_returns_empty_context() -> None:
     updates = asyncio.run(geocoder_context_node({"user_query": "show schools"}))
 
     assert updates == {"spatial_contexts": []}
+
+
+# ---------------------------------------------------------------------------
+# Slice 2 — pyproj Transformer caching
+# ---------------------------------------------------------------------------
+
+def test_build_bbox_for_point_does_not_reconstruct_transformer_on_second_call() -> None:
+    from app.graph.nodes import _get_transformer
+
+    _get_transformer.cache_clear()
+
+    _get_transformer(4326, 3857)
+    _get_transformer(3857, 4326)
+    _get_transformer(4326, 3857)  # second call — should be a cache hit
+
+    info = _get_transformer.cache_info()
+    assert info.hits >= 1, f"Expected at least one cache hit, got {info}"
+
+
+# ---------------------------------------------------------------------------
+# Slice 3 — HTTP clients out of AgentState
+# ---------------------------------------------------------------------------
+
+def test_agent_state_does_not_contain_http_client_fields() -> None:
+    from app.graph.state import AgentState
+    import typing
+    hints = typing.get_type_hints(AgentState)
+    assert "geocoder_http_client" not in hints, "geocoder_http_client must not be in AgentState"
+    assert "wfs_http_client" not in hints, "wfs_http_client must not be in AgentState"
+
+
+def test_build_initial_state_accepts_no_http_client_args() -> None:
+    import inspect
+    from app.graph.state import build_initial_state
+    sig = inspect.signature(build_initial_state)
+    assert "geocoder_http_client" not in sig.parameters
+    assert "wfs_http_client" not in sig.parameters
+    state = build_initial_state("test query")
+    assert "geocoder_http_client" not in state
+    assert "wfs_http_client" not in state
+
+
+# ---------------------------------------------------------------------------
+# Slice 6 — _distance_filter_for_target returns largest distance
+# ---------------------------------------------------------------------------
+
+def test_distance_filter_for_target_returns_largest_distance_when_multiple_predicates() -> None:
+    from app.graph.nodes import _distance_filter_for_target
+
+    predicates = [
+        {
+            "id": "p1",
+            "predicate": "DWITHIN",
+            "target_ids": ["r1"],
+            "distance": 500.0,
+            "units": "meters",
+        },
+        {
+            "id": "p2",
+            "predicate": "DWITHIN",
+            "target_ids": ["r1"],
+            "distance": 5.0,
+            "units": "kilometers",  # 5000 m > 500 m
+        },
+    ]
+
+    result = _distance_filter_for_target("r1", predicates)
+
+    assert result is not None
+    assert result["distance"] == 5.0
+    assert result["units"] == "kilometers"
+

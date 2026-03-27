@@ -3,7 +3,7 @@
 ## 1. Purpose
 This backend receives natural-language spatial requests, resolves geospatial context, selects the correct GeoServer layer, builds and validates ECQL, executes WFS queries, and returns concise user-facing responses.
 
-The current architecture is async-first and uses a markdown layer catalog (not vector embeddings) for layer selection.
+The architecture is async-first and uses a markdown layer catalog for layer selection.
 
 ## 2. Core Stack
 - Environment and package manager: uv
@@ -11,10 +11,10 @@ The current architecture is async-first and uses a markdown layer catalog (not v
 - Orchestration: LangGraph
 - LLM abstraction: LiteLLM + Pydantic structured outputs
 - Geospatial and OGC tooling:
-    - OWSLib for WFS capabilities and schema fallback parsing
-    - pygeofilter for AST-level ECQL validation
-    - shapely and pyproj for geometry and CRS handling
-    - httpx AsyncClient for geocoder and WFS HTTP requests
+  - OWSLib for WFS capabilities and schema fallback parsing
+  - pygeofilter for AST-level ECQL validation
+  - shapely and pyproj for geometry and CRS handling
+  - httpx AsyncClient for geocoder and WFS HTTP requests
 
 ## 3. High-Level Flow
 ```mermaid
@@ -24,11 +24,13 @@ graph TD
         Router -- "irrelevant" --> END
         Router -- "spatial_query" --> Geocoder[geocoder]
 
-        Geocoder --> Discoverer[discoverer]
+        Geocoder -- "required target unresolved" --> Fallback[fallback]
+        Geocoder -- "all required targets resolved" --> Discoverer[discoverer]
+
         Discoverer --> LayerSelector[layer_selector]
 
         LayerSelector -- "selected_layer present" --> Schema[schema]
-        LayerSelector -- "validation_error + empty selected_layer" --> Fallback[fallback]
+        LayerSelector -- "validation_error + empty selected_layer" --> Fallback
 
         Schema --> Generator[generator]
         Generator --> Validator{validator}
@@ -54,75 +56,86 @@ graph TD
 
 ### 4.2 Selection behavior
 - The layer selector prompt receives:
-    - user query
-    - parsed layer subject
-    - full markdown catalog content
-    - discovered layer-name allowlist
+  - user query
+  - parsed layer subject
+  - full markdown catalog content
+  - discovered layer-name allowlist
 - Model returns:
-    - layer_name
-    - confidence (high, medium, low)
+  - layer_name
+  - confidence (high, medium, low)
 - Guardrails:
-    - if selected layer is not in discovered allowlist, selection fails
-    - if confidence is low, selection fails
-    - failure emits low-confidence validation_error and routes to fallback
+  - if selected layer is not in discovered allowlist, selection fails
+  - if confidence is low, selection fails
+  - failure emits low-confidence validation_error and routes to fallback
 
 ### 4.3 Why no vector DB
 - Layer set is small enough to fit comfortably in prompt context.
 - Full-catalog reasoning avoids embedding semantic loss in multilingual cases.
 - Removes embedding model dependency and retrieval threshold tuning.
 
-## 5. Agent State Contract
-Agent state is a TypedDict passed across nodes. Key fields:
+## 5. API Contract and State Model
+### 5.1 Spatial parsing contract (non-backward-compatible)
+The analyzer emits only id-bound spatial structures:
 
+- spatial_targets: list of target definitions
+  - id: stable key, for example g1 or r1
+  - kind: explicit_geometry or spatial_reference
+  - value: WKT for explicit geometries, place text for references
+  - role: primary_area, secondary_area, proximity_anchor, unspecified
+  - crs: optional CRS hint for explicit geometry
+  - required: if true, unresolved target fails request
+
+- spatial_predicates: list of predicate bindings
+  - id: stable key, for example p1
+  - predicate: INTERSECTS, WITHIN, CONTAINS, DISJOINT, CROSSES, OVERLAPS, TOUCHES, DWITHIN, BEYOND
+  - target_ids: one or more ids from spatial_targets
+  - distance and units: optional for DWITHIN and BEYOND
+  - join_with_next: AND or OR
+  - required: if true, unresolved predicate target binding fails request
+
+### 5.2 AgentState key fields
 - Request and routing:
-    - user_query
-    - intent
-    - final_response
+  - user_query
+  - intent
+  - final_response
 - Spatial interpretation:
-    - spatial_reference
-    - spatial_filters: list of spatial predicate definitions (multi-filter support)
-    - explicit_coordinates
-    - explicit_bbox
-    - spatial_contexts: list of geocoded spatial contexts (aligned with filters)
+  - spatial_targets
+  - spatial_predicates
+  - spatial_contexts: resolved contexts with target_id, source, crs, bbox, geometry_wkt, geometry_type
+  - unresolved_target_ids
 - Layer context:
-    - available_layers
-    - layer_catalog_markdown
-    - selected_layer
-    - retrieval_mode
-    - retrieval_top_score
-    - retrieval_score_gap
-    - candidate_layers_for_llm_count
+  - available_layers
+  - layer_catalog_markdown
+  - selected_layer
+  - retrieval_mode
+  - retrieval_top_score
+  - retrieval_score_gap
+  - candidate_layers_for_llm_count
 - Schema and query:
-    - layer_schema
-    - geometry_column
-    - generated_ecql
-    - validation_error
-    - retry_count
+  - layer_schema
+  - geometry_column
+  - generated_ecql
+  - validation_error
+  - retry_count
 - Execution output:
-    - wfs_request_url
-    - wfs_result
+  - wfs_request_url
+  - wfs_result
 - Runtime dependencies and usage:
-    - geocoder_http_client
-    - wfs_http_client
-    - aggregate_usage
+  - geocoder_http_client
+  - wfs_http_client
+  - aggregate_usage
 
 ## 6. Node Responsibilities
 ### 6.1 router_analyzer
-- Parses intent and structured spatial hints.
+- Parses intent.
+- Emits id-bound spatial_targets and spatial_predicates.
 - Produces irrelevant response immediately when applicable.
 
 ### 6.2 geocoder
- - Resolves location into normalized spatial_contexts:
-     - crs
-     - bbox
-     - geometry_wkt
-     - geometry_type
-    - crs
-    - bbox
-    - geometry_wkt
-    - geometry_type
-- Supports explicit bbox and explicit point shortcuts.
-- Uses distance-aware buffering for DWITHIN and BEYOND.
+- Resolves each spatial_target into spatial_contexts, preserving target_id.
+- Uses DWITHIN and BEYOND bindings for deterministic per-target buffering.
+- Filters spatial_predicates to only resolved target ids.
+- If any required target or required predicate binding is unresolved, sets validation_error and routes to fallback.
 
 ### 6.3 discoverer
 - Discovers WFS layers from GetCapabilities (cached in tool layer with 12h TTL).
@@ -138,15 +151,16 @@ Agent state is a TypedDict passed across nodes. Key fields:
 - Fetches DescribeFeatureType and extracts attributes plus geometry column.
 
 ### 6.6 generator
-- Builds spatial ECQL deterministically from lists of spatial contexts and filters.
-    - Supports composing multiple spatial predicates (AND-composed ECQL) for multi-filter queries.
-    - Requests attribute-only ECQL from LLM.
-    - Merges both parts into final ECQL.
+- Builds spatial ECQL deterministically from resolved spatial_contexts plus id-bound spatial_predicates.
+- Supports unary and multi-target predicate bindings.
+- Honors join_with_next to compose AND or OR expression chains.
+- Requests attribute-only ECQL from LLM.
+- Merges spatial and attribute clauses into final ECQL.
 
 ### 6.7 validator
 - Parses ECQL with pygeofilter.
-    - Validates all composed spatial predicates and schema usage.
-    - Rejects non-constraining or invalid multi-predicate expressions.
+- Validates composed spatial predicates and schema usage.
+- Rejects non-constraining or invalid expressions.
 
 ### 6.8 executor
 - Executes WFS GetFeature with bounded count and configured srsName.
@@ -156,7 +170,7 @@ Agent state is a TypedDict passed across nodes. Key fields:
 - Converts result feature set into concise natural-language summary.
 
 ### 6.10 fallback
-- Produces user-safe terminal message for low-confidence layer mapping and retry exhaustion paths.
+- Produces user-safe terminal message for low-confidence layer mapping, unresolved required targets, and retry exhaustion paths.
 
 ## 7. API and Runtime Model
 - Endpoint: POST /api/spatial-chat
@@ -174,32 +188,23 @@ Key environment-driven settings:
 
 ## 9. Validation and Reliability
 - Retry loops:
-    - validator failure retries generator up to 3 attempts
-    - executor HTTP failure retries generator up to 3 attempts
+  - validator failure retries generator up to 3 attempts
+  - executor HTTP failure retries generator up to 3 attempts
 - Catalog resilience:
-    - if catalog refresh fails, system falls back to basic markdown generation from discovered layers
+  - if catalog refresh fails, system falls back to basic markdown generation from discovered layers
 - Selection resilience:
-    - invalid or low-confidence layer selections never proceed to schema or execution
+  - invalid or low-confidence layer selections never proceed to schema or execution
+- Spatial resolution resilience:
+  - unresolved optional targets and predicates are skipped
+  - unresolved required targets and predicates fail fast before discovery and execution
 
 ## 10. Current Limitations and Next Iterations
-
 - Single-layer selection per request (no multi-layer joins yet)
 - Limited interactive geometry workflows (drawn polygons and multi-step refinement not yet first-class)
-- Multi-spatial-predicate queries are now fully supported; single-predicate is a special case of the list-based design.
+- Binary target predicate bindings currently expand to independent layer-vs-target clauses; deeper target-to-target semantic operators can be added later
 - Future extension candidates:
-    - multi-layer orchestration
-    - richer alias curation and domain ontologies
-    - explicit user-guided disambiguation loop for close matches
-    - geospatial query bigger than biggest
-    - select layer as part of query
-    - improve retrieval accuracy
-
-
-
-
-
-use case:
-genral one-shot query
-
-- layer specific queries 
-- interactive queries 
+  - multi-layer orchestration
+  - richer alias curation and domain ontologies
+  - explicit user-guided disambiguation loop for close matches
+  - larger multi-step geospatial workflows
+    - layer specific queries
