@@ -299,7 +299,8 @@ def _build_single_spatial_ecql(
                 if not isinstance(raw_wkt, str):
                     return f"({bbox_ecql}) AND ({fine_ecql})", False
                 wkt_geom = shapely_wkt.loads(raw_wkt)
-                if wkt_geom.equals(bbox_poly):
+                wkt_bbox = box(*wkt_geom.bounds)
+                if wkt_bbox.equals(bbox_poly):
                     return fine_ecql, False
             except Exception:
                 pass
