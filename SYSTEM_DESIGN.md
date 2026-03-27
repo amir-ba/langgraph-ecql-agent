@@ -54,15 +54,30 @@ graph TD
 - Persistence: stored on disk at layer_catalog_markdown_path.
 - Staleness policy: refreshed when older than layer_catalog_stale_after_hours (default 8).
 
+### 4.1.1 Translation hardening
+- LLM translation prompt requires German and English fields to differ, with inline few-shot examples.
+- `_has_translation_occurred(row)` validator detects rows where `de_title == en_title` and `de_abstract == en_abstract`.
+- After the initial LLM merge, untranslated rows trigger a targeted repair LLM pass (best-effort; failure preserves first-pass output).
+- Every row carries a `translation_verified: bool` flag: `True` if DE/EN fields differ, `False` for fallback rows where they are identical.
+- Fallback rows (used when the LLM call fails entirely) are explicitly marked with `translation_verified: False`.
+
 ### 4.2 Selection behavior
+- Before LLM selection, a fuzzy pre-ranking step scores all layers against the query:
+  - Uses `difflib.SequenceMatcher` to score `layer_subject` (or `user_query`) against each layer's title, name, and abstract.
+  - Query text is normalized: lowercased, punctuation stripped, GIS stopwords removed (layer, ebene, karte, map, etc.).
+  - Produces `retrieval_top_score` (best match 0.0–1.0) and `retrieval_score_gap` (gap between rank-1 and rank-2).
+- Early-exit gate: if `retrieval_top_score < min_retrieval_score` (configurable, default 0.15), the node returns a fallback response immediately without calling the LLM.
+- Only the top `max_llm_candidates` (configurable, default 10) layers are passed to the LLM prompt, reducing token usage.
 - The layer selector prompt receives:
   - user query
   - parsed layer subject
   - full markdown catalog content
-  - discovered layer-name allowlist
+  - top-N candidate layer-name allowlist
 - Model returns:
   - layer_name
   - confidence (high, medium, low)
+  - reasoning (short explanation of why this layer was selected)
+  - score (LLM-expressed 0–1 confidence)
 - Guardrails:
   - if selected layer is not in discovered allowlist, selection fails
   - if confidence is low, selection fails
@@ -72,6 +87,7 @@ graph TD
 - Layer set is small enough to fit comfortably in prompt context.
 - Full-catalog reasoning avoids embedding semantic loss in multilingual cases.
 - Removes embedding model dependency and retrieval threshold tuning.
+- Fuzzy string matching (difflib.SequenceMatcher) provides lightweight pre-filtering and scoring without external dependencies. Semantic reranking with embeddings can be added in a follow-up phase if needed.
 
 ## 5. API Contract and State Model
 ### 5.1 Spatial parsing contract (non-backward-compatible)
@@ -108,9 +124,10 @@ The analyzer emits only id-bound spatial structures:
   - layer_catalog_markdown
   - selected_layer
   - retrieval_mode
-  - retrieval_top_score
-  - retrieval_score_gap
-  - candidate_layers_for_llm_count
+  - retrieval_top_score: fuzzy pre-ranking best score (0.0–1.0)
+  - retrieval_score_gap: difference between rank-1 and rank-2 scores
+  - retrieval_reason: diagnostic string with top candidate name, score, and gap
+  - candidate_layers_for_llm_count: number of layers passed to LLM (0 if early-exit gate fired)
 - Schema and query:
   - layer_schema
   - geometry_column
@@ -143,8 +160,12 @@ The analyzer emits only id-bound spatial structures:
 - Provides both available_layers and layer_catalog_markdown.
 
 ### 6.4 layer_selector
-- Performs full-catalog LLM selection.
-- Validates layer id and confidence.
+- Pre-ranks all available layers using fuzzy string matching (difflib.SequenceMatcher) against the query text.
+- Normalizes query text by removing GIS stopwords, punctuation, and lowercasing.
+- Gates on `min_retrieval_score`: if no layer scores above threshold, returns fallback without LLM call.
+- Passes only top-N candidates (configurable via `max_llm_candidates`) to the LLM prompt.
+- Populates `retrieval_top_score`, `retrieval_score_gap`, and `retrieval_reason` on every output.
+- Validates layer id and confidence from LLM response.
 - Emits low-confidence error path when needed.
 
 ### 6.5 schema
@@ -184,6 +205,8 @@ Key environment-driven settings:
 - geoserver_wfs_srs_name
 - layer_catalog_markdown_path
 - layer_catalog_stale_after_hours
+- min_retrieval_score: fuzzy matching threshold below which LLM selection is skipped (default 0.15)
+- max_llm_candidates: maximum number of pre-ranked layers sent to the LLM selector (default 10)
 - geocoder OAuth and API URLs
 
 ## 9. Validation and Reliability
@@ -193,7 +216,12 @@ Key environment-driven settings:
 - Catalog resilience:
   - if catalog refresh fails, system falls back to basic markdown generation from discovered layers
 - Selection resilience:
+  - fuzzy pre-ranking gate prevents LLM calls when no layer plausibly matches the query
   - invalid or low-confidence layer selections never proceed to schema or execution
+- Translation resilience:
+  - if translation LLM call fails, fallback rows with identical DE/EN text are used
+  - targeted repair pass attempts to fix untranslated rows; failure preserves first-pass output
+  - `translation_verified` flag distinguishes genuine translations from fallback copies
 - Spatial resolution resilience:
   - unresolved optional targets and predicates are skipped
   - unresolved required targets and predicates fail fast before discovery and execution

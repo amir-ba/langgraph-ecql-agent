@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re as _re
+from difflib import SequenceMatcher
 from functools import lru_cache
 from typing import Any, cast
 
@@ -32,6 +34,46 @@ from app.tools.layer_catalog import (
 
 logger = logging.getLogger(__name__)
 
+# GIS stopwords to strip from query text before fuzzy matching
+_GIS_STOPWORDS = frozenset({
+    "layer", "layers", "ebene", "ebenen", "karte", "karten",
+    "map", "maps", "show", "find", "get", "display", "the",
+    "me", "all", "for", "in", "of", "a", "an", "die", "der",
+    "das", "den", "dem", "ein", "eine", "einen", "einem",
+})
+
+
+def _normalize_query_text(text: str) -> str:
+    lowered = text.lower()
+    cleaned = _re.sub(r"[^\w\s]", "", lowered)
+    tokens = [t for t in cleaned.split() if t not in _GIS_STOPWORDS]
+    return " ".join(tokens)
+
+
+def _score_layer_against_query(layer: dict[str, str], query_text: str) -> float:
+    normalized_query = _normalize_query_text(query_text)
+    if not normalized_query:
+        return 0.0
+
+    fields_to_match = [
+        str(layer.get("title", "")),
+        str(layer.get("name", "")),
+        str(layer.get("abstract", "")),
+    ]
+
+    best = 0.0
+    for field_value in fields_to_match:
+        if not field_value:
+            continue
+        normalized_field = _normalize_query_text(field_value)
+        if not normalized_field:
+            continue
+        ratio = SequenceMatcher(None, normalized_query, normalized_field).ratio()
+        if ratio > best:
+            best = ratio
+
+    return best
+
 
 @lru_cache(maxsize=8)
 def _get_transformer(from_epsg: int, to_epsg: int) -> Transformer:
@@ -43,6 +85,14 @@ class LayerSelection(BaseModel):
     confidence: str = Field(
         default="high",
         description="Confidence in the selected layer: high, medium, or low",
+    )
+    reasoning: str = Field(
+        default="",
+        description="Short explanation of why this layer was selected",
+    )
+    score: float = Field(
+        default=0.0,
+        description="LLM-expressed confidence score from 0.0 to 1.0",
     )
 
 
@@ -473,6 +523,7 @@ async def wfs_discovery_node(state: AgentState, config: RunnableConfig | None = 
 async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None = None) -> dict[str, Any]:
     available_layers = state.get("available_layers", [])
     layer_subject = state.get("layer_subject")
+    settings = get_settings()
     logger.debug(
         "[layer_discoverer_node] input user_query=%s layer_subject=%s available_layers_count=%s",
         state.get("user_query", ""),
@@ -487,6 +538,54 @@ async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None
         logger.debug("[layer_discoverer_node] output=%s", _as_json(output))
         return output
 
+    # --- Pre-rank layers using fuzzy scoring ---
+    query_text = layer_subject or state.get("user_query", "")
+    scored_layers = [
+        (layer, _score_layer_against_query(layer, query_text))
+        for layer in available_layers
+    ]
+    scored_layers.sort(key=lambda pair: pair[1], reverse=True)
+
+    retrieval_top_score = scored_layers[0][1] if scored_layers else 0.0
+    retrieval_score_gap = (
+        (scored_layers[0][1] - scored_layers[1][1])
+        if len(scored_layers) > 1
+        else retrieval_top_score
+    )
+    retrieval_reason = (
+        f"top={scored_layers[0][0].get('name', '')} score={retrieval_top_score:.3f} gap={retrieval_score_gap:.3f}"
+        if scored_layers
+        else ""
+    )
+
+    # --- Early-exit gate: if best score is below threshold, skip LLM ---
+    min_score = getattr(settings, "min_retrieval_score", 0.15)
+    if retrieval_top_score < min_score:
+        output = {
+            "selected_layer": "",
+            "validation_error": (
+                "Low-confidence layer retrieval: unable to confidently map "
+                "layer_subject to available WFS layers"
+            ),
+            "final_response": _build_final_response(
+                summary=(
+                    "I could not confidently determine which map layer matches your request. "
+                    "Please mention a clearer feature type (for example, hospitals, roads, or schools)."
+                )
+            ),
+            "retrieval_mode": "catalog",
+            "retrieval_top_score": retrieval_top_score,
+            "retrieval_score_gap": retrieval_score_gap,
+            "retrieval_reason": retrieval_reason,
+            "candidate_layers_for_llm_count": 0,
+        }
+        logger.debug("[layer_discoverer_node] early-exit: top_score=%.3f < min=%.3f", retrieval_top_score, min_score)
+        return output
+
+    # --- Pass only top-N candidates to LLM ---
+    max_candidates = getattr(settings, "max_llm_candidates", 10)
+    top_layers = [layer for layer, _score in scored_layers[:max_candidates]]
+
     catalog_markdown = str(state.get("layer_catalog_markdown") or "")
     if not catalog_markdown:
         catalog_markdown = render_basic_markdown_catalog(available_layers)
@@ -498,7 +597,8 @@ async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None
                 "You are an expert GIS layer selector. "
                 "Choose exactly one layer_name from the markdown catalog. "
                 "Do not invent layer names. "
-                "Set confidence to low if no catalog entry clearly matches the request."
+                "Set confidence to low if no catalog entry clearly matches the request. "
+                "Provide a short reasoning for your selection and a score from 0 to 1."
             ),
         },
         {
@@ -507,7 +607,7 @@ async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None
                 f"User query:\n{state.get('user_query', '')}\n\n"
                 f"Layer subject:\n{layer_subject or ''}\n\n"
                 f"Layer catalog markdown:\n{catalog_markdown}\n\n"
-                f"Available layer names:\n{_as_json([str(layer.get('name', '')) for layer in available_layers])}"
+                f"Available layer names:\n{_as_json([str(layer.get('name', '')) for layer in top_layers])}"
             ),
         },
     ]
@@ -544,9 +644,10 @@ async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None
                 )
             ),
             "retrieval_mode": "catalog",
-            "retrieval_top_score": None,
-            "retrieval_score_gap": None,
-            "candidate_layers_for_llm_count": len(available_layers),
+            "retrieval_top_score": retrieval_top_score,
+            "retrieval_score_gap": retrieval_score_gap,
+            "retrieval_reason": retrieval_reason,
+            "candidate_layers_for_llm_count": len(top_layers),
         }
         logger.debug("[layer_discoverer_node] output=%s", _as_json(output))
         return output
@@ -555,9 +656,10 @@ async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None
         "selected_layer": chosen_layer,
         "validation_error": None,
         "retrieval_mode": "catalog",
-        "retrieval_top_score": None,
-        "retrieval_score_gap": None,
-        "candidate_layers_for_llm_count": len(available_layers),
+        "retrieval_top_score": retrieval_top_score,
+        "retrieval_score_gap": retrieval_score_gap,
+        "retrieval_reason": retrieval_reason,
+        "candidate_layers_for_llm_count": len(top_layers),
     }
     logger.debug("[layer_discoverer_node] output=%s", _as_json(output))
     return output

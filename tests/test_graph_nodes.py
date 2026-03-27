@@ -11,6 +11,8 @@ from pydantic import ValidationError
 
 from app.core.schemas import AnalyzedIntent, ECQLGeneration, SpatialPredicateBindingDef, SpatialTargetDef
 from app.graph.nodes import (
+    _normalize_query_text,
+    _score_layer_against_query,
     ecql_generator_node,
     geocoder_context_node,
     layer_discoverer_node,
@@ -972,4 +974,130 @@ def test_distance_filter_for_target_returns_largest_distance_when_multiple_predi
     assert result is not None
     assert result["distance"] == 5.0
     assert result["units"] == "kilometers"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — Selector Scoring
+# ---------------------------------------------------------------------------
+
+
+def test_score_layer_against_query_returns_high_for_exact_title_match() -> None:
+    layer = {"name": "city:hospitals", "title": "Hospitals", "abstract": "Healthcare facilities"}
+    score = _score_layer_against_query(layer, "hospitals")
+    assert score >= 0.8
+
+
+def test_score_layer_against_query_returns_low_for_unrelated() -> None:
+    layer = {"name": "city:hospitals", "title": "Hospitals", "abstract": "Healthcare facilities"}
+    score = _score_layer_against_query(layer, "rivers")
+    assert score < 0.4
+
+
+def test_score_layer_against_query_ranks_matching_layer_higher() -> None:
+    hospitals = {"name": "city:hospitals", "title": "Hospitals", "abstract": "Healthcare facilities"}
+    roads = {"name": "city:roads", "title": "Roads", "abstract": "Road network"}
+
+    score_hospitals = _score_layer_against_query(hospitals, "hospitals")
+    score_roads = _score_layer_against_query(roads, "hospitals")
+    assert score_hospitals > score_roads
+
+
+def test_normalize_query_text_strips_gis_stopwords() -> None:
+    normalized = _normalize_query_text("Show me the Layer for Schools")
+    assert "layer" not in normalized.lower()
+    assert "school" in normalized.lower()
+
+
+def test_normalize_query_text_lowercases_and_strips_punctuation() -> None:
+    normalized = _normalize_query_text("Hospitals!!!")
+    assert normalized == "hospitals"
+
+
+def test_layer_discoverer_node_returns_fallback_without_llm_when_scores_too_low(monkeypatch) -> None:
+    """When no layer scores above min_retrieval_score, fallback immediately without LLM."""
+    llm_called = False
+
+    async def fake_ainvoke_llm(**kwargs):
+        nonlocal llm_called
+        llm_called = True
+        raise AssertionError("LLM should not be called when scores are too low")
+
+    monkeypatch.setattr("app.graph.nodes.ainvoke_llm", fake_ainvoke_llm)
+    monkeypatch.setattr(
+        "app.graph.nodes.get_settings",
+        lambda: type("S", (), {
+            "min_retrieval_score": 0.5,
+            "max_llm_candidates": 10,
+            "current_model": "gpt-4.1",
+        })(),
+    )
+
+    updates = asyncio.run(layer_discoverer_node(
+        {
+            "user_query": "find xyzzy quantum flux capacitors",
+            "layer_subject": "xyzzy quantum flux capacitors",
+            "layer_catalog_markdown": (
+                "# GeoServer Layer Catalog\n\n"
+                "- **Layer ID:** `city:hospitals`\n"
+                "  - **EN Translation:** Hospitals\n"
+                "- **Layer ID:** `city:roads`\n"
+                "  - **EN Translation:** Roads"
+            ),
+            "available_layers": [
+                {"name": "city:hospitals", "title": "Hospitals", "abstract": "Healthcare"},
+                {"name": "city:roads", "title": "Roads", "abstract": "Road network"},
+            ],
+        }
+    ))
+
+    assert llm_called is False
+    assert updates["selected_layer"] == ""
+    assert updates["validation_error"] is not None
+    assert updates["retrieval_top_score"] is not None
+    assert updates["retrieval_top_score"] < 0.5
+
+
+def test_layer_discoverer_node_populates_scores_on_success(monkeypatch) -> None:
+    """When a high-score layer is found, retrieval_top_score and retrieval_score_gap should be populated."""
+    class _Layer:
+        layer_name = "city:hospitals"
+        confidence = "high"
+        reasoning = "Exact match"
+        score = 0.95
+
+    async def fake_ainvoke_llm(**kwargs):
+        return _Layer()
+
+    monkeypatch.setattr("app.graph.nodes.ainvoke_llm", fake_ainvoke_llm)
+    monkeypatch.setattr(
+        "app.graph.nodes.get_settings",
+        lambda: type("S", (), {
+            "min_retrieval_score": 0.15,
+            "max_llm_candidates": 10,
+            "current_model": "gpt-4.1",
+        })(),
+    )
+
+    updates = asyncio.run(layer_discoverer_node(
+        {
+            "user_query": "find hospitals",
+            "layer_subject": "hospitals",
+            "layer_catalog_markdown": (
+                "# GeoServer Layer Catalog\n\n"
+                "- **Layer ID:** `city:hospitals`\n"
+                "  - **EN Translation:** Hospitals\n"
+                "- **Layer ID:** `city:roads`\n"
+                "  - **EN Translation:** Roads"
+            ),
+            "available_layers": [
+                {"name": "city:hospitals", "title": "Hospitals", "abstract": "Healthcare"},
+                {"name": "city:roads", "title": "Roads", "abstract": "Road network"},
+            ],
+        }
+    ))
+
+    assert updates["selected_layer"] == "city:hospitals"
+    assert updates["retrieval_top_score"] is not None
+    assert updates["retrieval_top_score"] > 0.15
+    assert updates["retrieval_score_gap"] is not None
 

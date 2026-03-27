@@ -13,11 +13,10 @@ RUN python -m pip install --no-cache-dir uv
 
 # Copy dependency metadata first to maximize Docker layer caching.
 COPY pyproject.toml uv.lock ./
-RUN python -m uv sync --frozen --no-install-project
-# run tests
+RUN python -m uv sync --frozen --no-dev --no-install-project# run tests
 # Copy the FastAPI application source.
 COPY . .
-RUN python -m uv run pytest --maxfail=1 --disable-warnings -q
+RUN /home/cloud/.venv/bin/python -m pytest --maxfail=1 --disable-warnings -q
 
 EXPOSE 8080
 

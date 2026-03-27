@@ -30,6 +30,14 @@ def _normalize_text(value: str) -> str:
     return " ".join(str(value or "").strip().split())
 
 
+def _has_translation_occurred(row: dict[str, str | list[str]]) -> bool:
+    de_title = _normalize_text(str(row.get("de_title", "")))
+    en_title = _normalize_text(str(row.get("en_title", "")))
+    de_abstract = _normalize_text(str(row.get("de_abstract", "")))
+    en_abstract = _normalize_text(str(row.get("en_abstract", "")))
+    return de_title != en_title or de_abstract != en_abstract
+
+
 def _fallback_translation_rows(layers: list[dict[str, str]]) -> list[dict[str, str | list[str]]]:
     rows: list[dict[str, str | list[str]]] = []
     for layer in layers:
@@ -44,6 +52,7 @@ def _fallback_translation_rows(layers: list[dict[str, str]]) -> list[dict[str, s
                 "de_abstract": abstract,
                 "en_abstract": abstract,
                 "aliases": [title.lower()] if title else [],
+                "translation_verified": False,
             }
         )
     return rows
@@ -67,7 +76,20 @@ async def translate_layers_with_llm(layers: list[dict[str, str]]) -> list[dict[s
             "role": "system",
             "content": (
                 "You enrich GeoServer layer metadata. For each input layer, return bilingual metadata with "
-                "German and English text and useful aliases. Keep layer names unchanged. Return JSON only."
+                "German and English text and useful aliases. Keep layer names unchanged. Return JSON only.\n\n"
+                "IMPORTANT: German (de_title/de_abstract) and English (en_title/en_abstract) MUST differ. "
+                "If the source text is German, provide a proper English translation. "
+                "If the source text is English, provide a proper German translation.\n\n"
+                "Example:\n"
+                "  Input: {\"name\": \"city:schulen\", \"title\": \"Schulen\", \"abstract\": \"Alle Schulen im Stadtgebiet\"}\n"
+                "  Output: {\"name\": \"city:schulen\", \"de_title\": \"Schulen\", \"en_title\": \"Schools\", "
+                "\"de_abstract\": \"Alle Schulen im Stadtgebiet\", \"en_abstract\": \"All schools in the city area\", "
+                "\"aliases\": [\"schulen\", \"schools\"]}\n\n"
+                "Example:\n"
+                "  Input: {\"name\": \"city:hospitals\", \"title\": \"Hospitals\", \"abstract\": \"Healthcare facilities\"}\n"
+                "  Output: {\"name\": \"city:hospitals\", \"de_title\": \"Krankenhäuser\", \"en_title\": \"Hospitals\", "
+                "\"de_abstract\": \"Gesundheitseinrichtungen\", \"en_abstract\": \"Healthcare facilities\", "
+                "\"aliases\": [\"krankenhäuser\", \"hospitals\"]}"
             ),
         },
         {
@@ -84,70 +106,134 @@ async def translate_layers_with_llm(layers: list[dict[str, str]]) -> list[dict[s
 
     try:
         result = await ainvoke_llm(messages=messages, output_schema=LayerTranslationBatch)
-        parsed = []
-        for item in result.layers:
-            parsed.append(
-                {
-                    "name": _normalize_text(item.name),
-                    "de_title": _normalize_text(item.de_title),
-                    "en_title": _normalize_text(item.en_title),
-                    "de_abstract": _normalize_text(item.de_abstract),
-                    "en_abstract": _normalize_text(item.en_abstract),
-                    "aliases": [a.strip() for a in item.aliases if a and a.strip()],
-                }
-            )
-        if parsed:
-            parsed_by_name = {
-                _normalize_text(str(item.get("name", ""))): item for item in parsed if _normalize_text(str(item.get("name", "")))
-            }
+        merged_rows = _merge_translation_results(result, fallback_rows)
 
-            merged_rows: list[dict[str, str | list[str]]] = []
-            for index, fallback in enumerate(fallback_rows):
-                fallback_name = _normalize_text(str(fallback.get("name", "")))
-                candidate = parsed_by_name.get(fallback_name)
-                if candidate is None and index < len(parsed):
-                    candidate = parsed[index]
+        if merged_rows:
+            # Identify rows where translation did not occur and attempt a repair pass
+            untranslated_indices = [
+                i for i, row in enumerate(merged_rows) if not _has_translation_occurred(row)
+            ]
 
-                if candidate is None:
-                    merged_rows.append(fallback)
-                    continue
-
-                de_title = _normalize_text(str(candidate.get("de_title", ""))) or _normalize_text(str(fallback.get("de_title", "")))
-                en_title = _normalize_text(str(candidate.get("en_title", ""))) or _normalize_text(str(fallback.get("en_title", "")))
-                de_abstract = _normalize_text(str(candidate.get("de_abstract", ""))) or _normalize_text(
-                    str(fallback.get("de_abstract", ""))
-                )
-                en_abstract = _normalize_text(str(candidate.get("en_abstract", ""))) or _normalize_text(
-                    str(fallback.get("en_abstract", ""))
-                )
-                aliases = [
-                    _normalize_text(str(alias))
-                    for alias in (candidate.get("aliases") or [])
-                    if _normalize_text(str(alias))
-                ]
-                if not aliases:
-                    aliases = [
-                        _normalize_text(str(alias))
-                        for alias in (fallback.get("aliases") or [])
-                        if _normalize_text(str(alias))
-                    ]
-
-                merged_rows.append(
+            if untranslated_indices:
+                repair_input = [merged_rows[i] for i in untranslated_indices]
+                repair_messages = [
                     {
-                        "name": fallback_name or _normalize_text(str(candidate.get("name", ""))),
-                        "de_title": de_title,
-                        "en_title": en_title,
-                        "de_abstract": de_abstract,
-                        "en_abstract": en_abstract,
-                        "aliases": aliases,
+                        "role": "system",
+                        "content": (
+                            "You are a translation repair assistant. The following layer rows have identical "
+                            "German and English fields. Translate each en_title from German to English → en_title, "
+                            "and each en_abstract from German to English → en_abstract. "
+                            "If a field is already English, translate it to German for the de_ field. "
+                            "Return only the corrected rows. Return JSON only."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            "Fix translations for these layers. "
+                            "Output fields per layer: name, de_title, en_title, de_abstract, en_abstract, aliases.\n"
+                            f"Input layers:\n{repair_input}"
+                        ),
+                    },
+                ]
+                try:
+                    repair_result = await ainvoke_llm(messages=repair_messages, output_schema=LayerTranslationBatch)
+                    repair_parsed = _parse_translation_batch(repair_result)
+                    repair_by_name = {
+                        _normalize_text(str(item.get("name", ""))): item
+                        for item in repair_parsed
+                        if _normalize_text(str(item.get("name", "")))
                     }
-                )
+                    for idx, orig_idx in enumerate(untranslated_indices):
+                        row_name = _normalize_text(str(merged_rows[orig_idx].get("name", "")))
+                        repaired = repair_by_name.get(row_name)
+                        if repaired and _has_translation_occurred(repaired):
+                            merged_rows[orig_idx] = repaired
+                except Exception:
+                    pass  # Repair pass is best-effort
+
+            # Mark all rows with translation_verified
+            for row in merged_rows:
+                row["translation_verified"] = _has_translation_occurred(row)
 
             return merged_rows
     except Exception:
         pass
 
     return fallback_rows
+
+
+def _parse_translation_batch(result: LayerTranslationBatch) -> list[dict[str, str | list[str]]]:
+    parsed = []
+    for item in result.layers:
+        parsed.append(
+            {
+                "name": _normalize_text(item.name),
+                "de_title": _normalize_text(item.de_title),
+                "en_title": _normalize_text(item.en_title),
+                "de_abstract": _normalize_text(item.de_abstract),
+                "en_abstract": _normalize_text(item.en_abstract),
+                "aliases": [a.strip() for a in item.aliases if a and a.strip()],
+            }
+        )
+    return parsed
+
+
+def _merge_translation_results(
+    result: LayerTranslationBatch,
+    fallback_rows: list[dict[str, str | list[str]]],
+) -> list[dict[str, str | list[str]]]:
+    parsed = _parse_translation_batch(result)
+    if not parsed:
+        return []
+
+    parsed_by_name = {
+        _normalize_text(str(item.get("name", ""))): item for item in parsed if _normalize_text(str(item.get("name", "")))
+    }
+
+    merged_rows: list[dict[str, str | list[str]]] = []
+    for index, fallback in enumerate(fallback_rows):
+        fallback_name = _normalize_text(str(fallback.get("name", "")))
+        candidate = parsed_by_name.get(fallback_name)
+        if candidate is None and index < len(parsed):
+            candidate = parsed[index]
+
+        if candidate is None:
+            merged_rows.append(fallback)
+            continue
+
+        de_title = _normalize_text(str(candidate.get("de_title", ""))) or _normalize_text(str(fallback.get("de_title", "")))
+        en_title = _normalize_text(str(candidate.get("en_title", ""))) or _normalize_text(str(fallback.get("en_title", "")))
+        de_abstract = _normalize_text(str(candidate.get("de_abstract", ""))) or _normalize_text(
+            str(fallback.get("de_abstract", ""))
+        )
+        en_abstract = _normalize_text(str(candidate.get("en_abstract", ""))) or _normalize_text(
+            str(fallback.get("en_abstract", ""))
+        )
+        aliases = [
+            _normalize_text(str(alias))
+            for alias in (candidate.get("aliases") or [])
+            if _normalize_text(str(alias))
+        ]
+        if not aliases:
+            aliases = [
+                _normalize_text(str(alias))
+                for alias in (fallback.get("aliases") or [])
+                if _normalize_text(str(alias))
+            ]
+
+        merged_rows.append(
+            {
+                "name": fallback_name or _normalize_text(str(candidate.get("name", ""))),
+                "de_title": de_title,
+                "en_title": en_title,
+                "de_abstract": de_abstract,
+                "en_abstract": en_abstract,
+                "aliases": aliases,
+            }
+        )
+
+    return merged_rows
 
 
 def _render_markdown_from_rows(rows: list[dict[str, str | list[str]]]) -> str:

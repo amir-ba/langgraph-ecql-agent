@@ -22,6 +22,7 @@ class AgentState(TypedDict):
     retrieval_mode: NotRequired[str]
     retrieval_top_score: NotRequired[float | None]
     retrieval_score_gap: NotRequired[float | None]
+    retrieval_reason: NotRequired[str]
     candidate_layers_for_llm_count: NotRequired[int]
     selected_layer: NotRequired[str]
     layer_schema: NotRequired[dict[str, str]]

@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     llm_prompt_cache_ttl_seconds: int = 3600
     llm_prompt_cache_max_entries: int = 512
 
+    min_retrieval_score: float = 0.15
+    max_llm_candidates: int = 10
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

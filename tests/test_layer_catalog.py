@@ -5,6 +5,8 @@ from pathlib import Path
 from app.tools.layer_catalog import (
     LayerTranslationBatch,
     LayerTranslationRow,
+    _fallback_translation_rows,
+    _has_translation_occurred,
     ensure_markdown_layer_catalog,
     parse_markdown_layer_catalog,
     translate_layers_with_llm,
@@ -137,3 +139,125 @@ def test_translate_layers_with_llm_keeps_input_cardinality_on_partial_llm_result
     assert translated[0]["en_title"] == "Roads"
     assert translated[1]["name"] == "city:lakes"
     assert translated[1]["en_title"] == "Seen"
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 — Translation Hardening
+# ---------------------------------------------------------------------------
+
+
+def test_has_translation_occurred_returns_false_when_en_and_de_are_identical() -> None:
+    row = {
+        "name": "city:roads",
+        "de_title": "Strassen",
+        "en_title": "Strassen",
+        "de_abstract": "Strassennetz",
+        "en_abstract": "Strassennetz",
+    }
+    assert _has_translation_occurred(row) is False
+
+
+def test_has_translation_occurred_returns_true_when_titles_differ() -> None:
+    row = {
+        "name": "city:roads",
+        "de_title": "Strassen",
+        "en_title": "Roads",
+        "de_abstract": "Strassennetz",
+        "en_abstract": "Strassennetz",
+    }
+    assert _has_translation_occurred(row) is True
+
+
+def test_has_translation_occurred_returns_true_when_abstracts_differ() -> None:
+    row = {
+        "name": "city:roads",
+        "de_title": "Strassen",
+        "en_title": "Strassen",
+        "de_abstract": "Strassennetz",
+        "en_abstract": "Road network",
+    }
+    assert _has_translation_occurred(row) is True
+
+
+def test_fallback_translation_rows_marks_translation_verified_false() -> None:
+    layers = [{"name": "city:roads", "title": "Strassen", "abstract": "Strassennetz"}]
+    rows = _fallback_translation_rows(layers)
+    assert len(rows) == 1
+    assert rows[0]["translation_verified"] is False
+
+
+def test_translate_layers_with_llm_fires_repair_pass_when_en_matches_de(monkeypatch) -> None:
+    """When the first LLM call returns identical EN/DE, a second repair pass should fix them."""
+    call_count = 0
+
+    async def fake_ainvoke_llm(*, messages, output_schema):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # First call: LLM returns identical EN/DE (no real translation)
+            return LayerTranslationBatch(
+                layers=[
+                    LayerTranslationRow(
+                        name="city:roads",
+                        de_title="Strassen",
+                        en_title="Strassen",
+                        de_abstract="Strassennetz",
+                        en_abstract="Strassennetz",
+                        aliases=["strassen"],
+                    )
+                ]
+            )
+        # Second call (repair): returns fixed translations
+        return LayerTranslationBatch(
+            layers=[
+                LayerTranslationRow(
+                    name="city:roads",
+                    de_title="Strassen",
+                    en_title="Roads",
+                    de_abstract="Strassennetz",
+                    en_abstract="Road network",
+                    aliases=["strassen", "roads"],
+                )
+            ]
+        )
+
+    monkeypatch.setattr("app.tools.layer_catalog.ainvoke_llm", fake_ainvoke_llm)
+
+    layers = [{"name": "city:roads", "title": "Strassen", "abstract": "Strassennetz"}]
+    translated = asyncio.run(translate_layers_with_llm(layers))
+
+    assert call_count == 2, "A repair pass should have been triggered"
+    assert translated[0]["en_title"] == "Roads"
+    assert translated[0]["de_title"] == "Strassen"
+    assert translated[0]["en_abstract"] == "Road network"
+    assert translated[0]["translation_verified"] is True
+
+
+def test_translate_layers_with_llm_skips_repair_when_translation_ok(monkeypatch) -> None:
+    """When the first LLM call returns differentiated EN/DE, no repair pass fires."""
+    call_count = 0
+
+    async def fake_ainvoke_llm(*, messages, output_schema):
+        nonlocal call_count
+        call_count += 1
+        return LayerTranslationBatch(
+            layers=[
+                LayerTranslationRow(
+                    name="city:roads",
+                    de_title="Strassen",
+                    en_title="Roads",
+                    de_abstract="Strassennetz",
+                    en_abstract="Road network",
+                    aliases=["strassen", "roads"],
+                )
+            ]
+        )
+
+    monkeypatch.setattr("app.tools.layer_catalog.ainvoke_llm", fake_ainvoke_llm)
+
+    layers = [{"name": "city:roads", "title": "Strassen", "abstract": "Strassennetz"}]
+    translated = asyncio.run(translate_layers_with_llm(layers))
+
+    assert call_count == 1, "No repair should fire when translations already differ"
+    assert translated[0]["en_title"] == "Roads"
+    assert translated[0]["translation_verified"] is True
