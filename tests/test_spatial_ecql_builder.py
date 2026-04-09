@@ -1,6 +1,5 @@
 """Spatial ECQL builder tests for id-bound target/predicate mapping."""
 
-from app.core.schemas import SpatialPredicateBindingDef , SpatialContextPayload
 from app.tools.spatial_ecql_builder import build_spatial_ecql
 
 
@@ -95,24 +94,24 @@ def test_build_spatial_ecql_uses_polygon_for_topological_predicate() -> None:
 
 def test_build_spatial_ecql_accepts_pydantic_predicates() -> None:
     spatial_contexts = [
-        SpatialContextPayload({
+        {
             "target_id": "g1",
             "crs": "EPSG:4326",
             "bbox": [13.1, 52.3, 13.8, 52.7],
             "geometry_wkt": "POINT (13.45 52.5)",
             "geometry_type": "Point",
-        })
+        }
     ]
     spatial_predicates = [
-        SpatialPredicateBindingDef(
-            id="p1",
-            predicate="DWITHIN",
-            target_ids=["g1"],
-            distance=5,
-            units="kilometers",
-            join_with_next="AND",
-            required=True,
-        )
+{
+            "id": "p1",
+            "predicate": "DWITHIN",
+            "target_ids": ["g1"],
+            "distance": 5.0,
+            "units": "kilometers",
+            "join_with_next": "AND",
+            "required": True,
+        }
     ]
 
     ecql = build_spatial_ecql("the_geom", spatial_contexts, spatial_predicates)
