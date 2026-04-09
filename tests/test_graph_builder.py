@@ -19,7 +19,7 @@ def test_route_after_analysis_returns_expected_target() -> None:
 
 def test_route_after_geocoder_handles_required_target_resolution_failures() -> None:
     assert route_after_geocoder({"validation_error": None}) == "discoverer"
-    assert route_after_geocoder({"validation_error": "Required spatial targets could not be resolved: r1"}) == "fallback"
+    assert route_after_geocoder({"validation_error": "location_unresolved:\"r1\""}) == "fallback"
 
 
 def test_validator_router_handles_retry_and_fallback() -> None:

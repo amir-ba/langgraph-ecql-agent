@@ -408,7 +408,8 @@ def test_geocoder_context_node_returns_validation_error_for_required_unresolved_
     )
 
     assert updates["validation_error"] is not None
-    assert "r1" in updates["validation_error"]
+    assert updates["validation_error"].startswith("location_unresolved:")
+    assert "Unknown Place" in updates["validation_error"]
 
 
 def test_layer_discoverer_node_selects_layer(monkeypatch) -> None:

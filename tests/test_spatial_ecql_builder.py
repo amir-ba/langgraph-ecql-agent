@@ -1,5 +1,6 @@
 """Spatial ECQL builder tests for id-bound target/predicate mapping."""
 
+from app.core.schemas import SpatialPredicateBindingDef , SpatialContextPayload
 from app.tools.spatial_ecql_builder import build_spatial_ecql
 
 
@@ -90,6 +91,34 @@ def test_build_spatial_ecql_uses_polygon_for_topological_predicate() -> None:
     ecql = build_spatial_ecql("the_geom", spatial_contexts, spatial_predicates)
 
     assert ecql == "INTERSECTS(the_geom, SRID=4326;POLYGON ((13.1 52.3, 13.8 52.3, 13.8 52.7, 13.1 52.7, 13.1 52.3)))"
+
+
+def test_build_spatial_ecql_accepts_pydantic_predicates() -> None:
+    spatial_contexts = [
+        SpatialContextPayload({
+            "target_id": "g1",
+            "crs": "EPSG:4326",
+            "bbox": [13.1, 52.3, 13.8, 52.7],
+            "geometry_wkt": "POINT (13.45 52.5)",
+            "geometry_type": "Point",
+        })
+    ]
+    spatial_predicates = [
+        SpatialPredicateBindingDef(
+            id="p1",
+            predicate="DWITHIN",
+            target_ids=["g1"],
+            distance=5,
+            units="kilometers",
+            join_with_next="AND",
+            required=True,
+        )
+    ]
+
+    ecql = build_spatial_ecql("the_geom", spatial_contexts, spatial_predicates)
+
+    assert ecql is not None
+    assert "DWITHIN(the_geom, SRID=4326;POINT (13.45 52.5), 5.0, kilometers)" in ecql
 
 
 def test_build_spatial_ecql_builds_multi_predicates_with_and() -> None:
@@ -212,6 +241,8 @@ def test_build_spatial_ecql_uses_or_join_operator() -> None:
 
     assert ecql is not None
     assert " OR " in ecql
+    assert "INTERSECTS(the_geom, SRID=4326;POLYGON ((7.0 50.0" in ecql
+    assert "INTERSECTS(the_geom, SRID=4326;POLYGON ((8.0 51.0" in ecql
 
 
 def test_build_spatial_ecql_skips_optional_unresolved_predicate() -> None:
@@ -249,6 +280,40 @@ def test_build_spatial_ecql_skips_optional_unresolved_predicate() -> None:
     assert "INTERSECTS(the_geom, SRID=4326;POLYGON" in ecql
     assert "missing-target" not in ecql
 
+def test_build_spatial_ecql_skips_optional_unresolved_empty_predicate() -> None:
+    spatial_contexts = [
+        {
+            "target_id": "g1",
+            "crs": "EPSG:4326",
+            "bbox": [7.0, 50.0, 7.5, 50.5],
+            "geometry_wkt": "POLYGON ((7.0 50.0, 7.5 50.0, 7.5 50.5, 7.0 50.5, 7.0 50.0))",
+            "geometry_type": "Polygon",
+        }
+    ]
+    spatial_predicates = [
+        {
+            "id": "p1",
+            "predicate": "INTERSECTS",
+            "target_ids": ["g1"],
+            "join_with_next": "AND",
+            "required": True,
+        },
+        {
+            "id": "p2",
+            "predicate": "DWITHIN",
+            "target_ids": [],
+            "distance": 100,
+            "units": "meters",
+            "join_with_next": "AND",
+            "required": False,
+        },
+    ]
+
+    ecql = build_spatial_ecql("the_geom", spatial_contexts, spatial_predicates)
+
+    assert ecql is not None
+    assert "INTERSECTS(the_geom, SRID=4326;POLYGON" in ecql
+    assert "DWITHIN" not in ecql
 
 def test_build_spatial_ecql_returns_none_for_required_unresolved_predicate() -> None:
     spatial_contexts = [

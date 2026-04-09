@@ -242,6 +242,7 @@ async def unified_router_analyzer_node(state: AgentState, config: RunnableConfig
 async def geocoder_context_node(state: AgentState, config: RunnableConfig | None = None) -> dict[str, Any]:
     spatial_targets = _normalize_spatial_targets(state.get("spatial_targets"))
     spatial_predicates = _normalize_spatial_predicates(state.get("spatial_predicates"))
+    layer_subject = str(state.get("layer_subject") or "").strip().lower()
 
     logger.debug(
         "[geocoder_context_node] input targets=%s predicates=%s",
@@ -256,6 +257,8 @@ async def geocoder_context_node(state: AgentState, config: RunnableConfig | None
 
     contexts: list[dict[str, Any]] = []
     unresolved_target_ids: list[str] = []
+    # Maps target_id -> human-readable label for user-facing error messages.
+    target_labels: dict[str, str] = {}
 
     configurable = (config or {}).get("configurable") or {}
     geocoder_http_client = cast(httpx.AsyncClient | None, configurable.get("geocoder_http_client"))
@@ -267,9 +270,28 @@ async def geocoder_context_node(state: AgentState, config: RunnableConfig | None
         target_value = str(target.get("value") or "").strip()
         required = bool(target.get("required", True))
 
+        # Build a human-readable label: use the location name for references,
+        # or a short geometry description for explicit geometries.
+        if target_kind == "spatial_reference" and target_value:
+            target_labels[target_id] = f'"{target_value}"'
+        elif target_kind == "explicit_geometry" and target_value:
+            geom_preview = target_value[:40].rstrip() + ("..." if len(target_value) > 40 else "")
+            target_labels[target_id] = f"geometry ({geom_preview})"
+
         if not target_id or not target_kind or not target_value:
             if required and target_id:
                 unresolved_target_ids.append(target_id)
+            continue
+
+        # A spatial_reference whose value matches the layer subject is the layer being
+        # queried itself — not a geocodable location. Skip it silently so it never
+        # becomes an unresolved required target.
+        if target_kind == "spatial_reference" and layer_subject and target_value.lower() == layer_subject:
+            logger.debug(
+                "[geocoder_context_node] skipping self-referential target %s (value=%r matches layer_subject)",
+                target_id,
+                target_value,
+            )
             continue
 
         distance_filter = _distance_filter_for_target(target_id, spatial_predicates)
@@ -309,11 +331,14 @@ async def geocoder_context_node(state: AgentState, config: RunnableConfig | None
 
     if unresolved_target_ids:
         unresolved_unique = sorted({target_id for target_id in unresolved_target_ids if target_id})
+        unresolved_labels = [
+            target_labels.get(tid, tid) for tid in unresolved_unique
+        ]
         output: dict[str, Any] = {
             "spatial_contexts": contexts,
             "spatial_predicates": filtered_predicates,
             "unresolved_target_ids": unresolved_unique,
-            "validation_error": "Required spatial targets could not be resolved: " + ", ".join(unresolved_unique),
+            "validation_error": "location_unresolved:" + "||".join(unresolved_labels),
         }
         logger.debug("[geocoder_context_node] output=%s", _as_json(output))
         return output
@@ -867,6 +892,24 @@ async def fallback_node(state: AgentState, config: RunnableConfig | None = None)
                 )
             )
         }
+        logger.debug("[fallback_node] output=%s", _as_json(output))
+        return output
+
+    if str(error).startswith("location_unresolved:"):
+        labels_raw = str(error).split("location_unresolved:", 1)[1]
+        labels = [label.strip() for label in labels_raw.split("||") if label.strip()]
+        if labels:
+            location_list = ", ".join(labels)
+            summary = (
+                f"I could not find the location {location_list} on the map. "
+                "Please check the spelling or try a different place name."
+            )
+        else:
+            summary = (
+                "I could not find one of the locations you mentioned. "
+                "Please check the spelling or try a different place name."
+            )
+        output = {"final_response": _build_final_response(summary=summary)}
         logger.debug("[fallback_node] output=%s", _as_json(output))
         return output
 
