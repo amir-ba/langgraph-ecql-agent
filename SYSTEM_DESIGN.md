@@ -3,13 +3,14 @@
 ## 1. Purpose
 This backend receives natural-language spatial requests, resolves geospatial context, selects the correct GeoServer layer, builds and validates ECQL, executes WFS queries, and returns concise user-facing responses.
 
-The architecture is async-first and uses a markdown layer catalog for layer selection.
+The architecture is async-first and uses a markdown layer catalog and semantic vector search for layer selection.
 
 ## 2. Core Stack
 - Environment and package manager: uv
 - API framework: FastAPI
 - Orchestration: LangGraph
 - LLM abstraction: LiteLLM + Pydantic structured outputs
+- Semantic search: ChromaDB (in-memory) + jina-embeddings-v2-base-de
 - Geospatial and OGC tooling:
   - OWSLib for WFS capabilities and schema fallback parsing
   - pygeofilter for AST-level ECQL validation
@@ -47,12 +48,13 @@ graph TD
         Fallback --> END
 ```
 
-## 4. Layer Selection Strategy (Markdown Catalog)
+## 4. Layer Selection Strategy (Semantic Search + Markdown Catalog)
 ### 4.1 Catalog lifecycle
 - Source of truth: WFS GetCapabilities discovery.
 - Catalog format: enriched markdown with layer id, DE and EN metadata, aliases.
 - Persistence: stored on disk at layer_catalog_markdown_path.
 - Staleness policy: refreshed when older than layer_catalog_stale_after_hours (default 8).
+- On application startup, layers are discovered, the markdown catalog is built, and all layers are indexed into the in-memory vector store. Embeddings are generated via the configured embedding_model through LLM_BASE_URL.
 
 ### 4.1.1 Translation hardening
 - LLM translation prompt requires German and English fields to differ, with inline few-shot examples.
@@ -62,10 +64,11 @@ graph TD
 - Fallback rows (used when the LLM call fails entirely) are explicitly marked with `translation_verified: False`.
 
 ### 4.2 Selection behavior
-- Before LLM selection, a fuzzy pre-ranking step scores all layers against the query:
-  - Uses `difflib.SequenceMatcher` to score `layer_subject` (or `user_query`) against each layer's title, name, and abstract.
-  - Query text is normalized: lowercased, punctuation stripped, GIS stopwords removed (layer, ebene, karte, map, etc.).
+- Primary: semantic vector search using ChromaDB and jina-embeddings-v2-base-de.
+  - Each layer is embedded as a rich text document combining: layer name, DE/EN titles, DE/EN abstracts, and aliases.
+  - At query time, the query text is embedded and a cosine similarity search returns the top candidates.
   - Produces `retrieval_top_score` (best match 0.0–1.0) and `retrieval_score_gap` (gap between rank-1 and rank-2).
+- If the semantic index is unavailable, the node returns a low-confidence validation error and does not execute LLM layer selection.
 - Early-exit gate: if `retrieval_top_score < min_retrieval_score` (configurable, default 0.15), the node returns a fallback response immediately without calling the LLM.
 - Only the top `max_llm_candidates` (configurable, default 10) layers are passed to the LLM prompt, reducing token usage.
 - The layer selector prompt receives:
@@ -83,11 +86,14 @@ graph TD
   - if confidence is low, selection fails
   - failure emits low-confidence validation_error and routes to fallback
 
-### 4.3 Why no vector DB
-- Layer set is small enough to fit comfortably in prompt context.
-- Full-catalog reasoning avoids embedding semantic loss in multilingual cases.
-- Removes embedding model dependency and retrieval threshold tuning.
-- Fuzzy string matching (difflib.SequenceMatcher) provides lightweight pre-filtering and scoring without external dependencies. Semantic reranking with embeddings can be added in a follow-up phase if needed.
+### 4.3 Vector store details
+- Backend: ChromaDB in-memory (ephemeral, no persistence across restarts).
+- Embedding model: jina-embeddings-v2-base-de, accessed via the OpenAI-compatible embeddings endpoint at LLM_BASE_URL.
+- Indexing: attempted at application startup after WFS discovery and catalog build.
+- Runtime refresh: opportunistic refresh in discovery/selection path every `vector_reindex_hours` (default 24h).
+- Recovery: if startup indexing fails, runtime requests can re-attempt indexing and recover without process restart.
+- Document format per layer: `"Layer: {name} | Title DE: {de_title} | Title EN: {en_title} | Abstract DE: {de_abstract} | Abstract EN: {en_abstract} | Aliases: {aliases}"`
+- Singleton: a module-level `LayerVectorStore` instance is shared across all requests.
 
 ## 5. API Contract and State Model
 ### 5.1 Spatial parsing contract (non-backward-compatible)
@@ -124,7 +130,7 @@ The analyzer emits only id-bound spatial structures:
   - layer_catalog_markdown
   - selected_layer
   - retrieval_mode
-  - retrieval_top_score: fuzzy pre-ranking best score (0.0–1.0)
+  - retrieval_top_score: semantic pre-ranking best score (0.0–1.0)
   - retrieval_score_gap: difference between rank-1 and rank-2 scores
   - retrieval_reason: diagnostic string with top candidate name, score, and gap
   - candidate_layers_for_llm_count: number of layers passed to LLM (0 if early-exit gate fired)
@@ -160,11 +166,12 @@ The analyzer emits only id-bound spatial structures:
 - Provides both available_layers and layer_catalog_markdown.
 
 ### 6.4 layer_selector
-- Pre-ranks all available layers using fuzzy string matching (difflib.SequenceMatcher) against the query text.
-- Normalizes query text by removing GIS stopwords, punctuation, and lowercasing.
+- Pre-ranks available layers using semantic vector search (ChromaDB cosine similarity) against the query text.
+- Attempts opportunistic semantic re-indexing if vector store is missing/stale.
 - Gates on `min_retrieval_score`: if no layer scores above threshold, returns fallback without LLM call.
 - Passes only top-N candidates (configurable via `max_llm_candidates`) to the LLM prompt.
 - Populates `retrieval_top_score`, `retrieval_score_gap`, and `retrieval_reason` on every output.
+- Sets `retrieval_mode` to `"semantic"`.
 - Validates layer id and confidence from LLM response.
 - Emits low-confidence error path when needed.
 
@@ -195,8 +202,14 @@ The analyzer emits only id-bound spatial structures:
 
 ## 7. API and Runtime Model
 - Endpoint: POST /api/spatial-chat
-- Transport: Server-Sent Events with status, update, final, done events
+  - Transport: Server-Sent Events with status, update, final, done events
+- Endpoint: POST /api/layer-discovery
+  - Standalone layer discovery reusing `wfs_discovery_node` + `layer_discoverer_node` behavior.
+  - Request: `{ "query": "<natural language>" }`
+  - Response: `{ layer_name, validation_error, retrieval_mode, retrieval_top_score, retrieval_score_gap, retrieval_reason }`.
+  - Uses the same vector settings, confidence gate, and selection semantics as the main query pipeline.
 - HTTP clients: pooled AsyncClient instances attached to app lifespan and injected into state
+- Startup: application lifespan discovers WFS layers, builds markdown catalog, and indexes all layers into the vector store.
 
 ## 8. Configuration
 Key environment-driven settings:
@@ -205,8 +218,11 @@ Key environment-driven settings:
 - geoserver_wfs_srs_name
 - layer_catalog_markdown_path
 - layer_catalog_stale_after_hours
-- min_retrieval_score: fuzzy matching threshold below which LLM selection is skipped (default 0.15)
+- min_retrieval_score: semantic/fuzzy matching threshold below which LLM selection is skipped (default 0.15)
 - max_llm_candidates: maximum number of pre-ranked layers sent to the LLM selector (default 10)
+- embedding_model: embedding model for semantic search (default jina-embeddings-v2-base-de)
+- vector_store_top_k: number of results returned from vector search (default 8)
+- vector_reindex_hours: runtime semantic index refresh interval (default 24)
 - geocoder OAuth and API URLs
 
 ## 9. Validation and Reliability
@@ -216,7 +232,9 @@ Key environment-driven settings:
 - Catalog resilience:
   - if catalog refresh fails, system falls back to basic markdown generation from discovered layers
 - Selection resilience:
-  - fuzzy pre-ranking gate prevents LLM calls when no layer plausibly matches the query
+  - semantic vector search provides meaning-based matching even without keyword overlap
+  - if vector store indexing fails at startup, runtime requests can re-attempt semantic indexing
+  - early-exit gate prevents LLM calls when no layer plausibly matches the query
   - invalid or low-confidence layer selections never proceed to schema or execution
 - Translation resilience:
   - if translation LLM call fails, fallback rows with identical DE/EN text are used

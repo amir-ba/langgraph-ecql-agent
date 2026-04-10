@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from app.core.http_clients import HttpClientPool, get_http_client_pool
 from app.graph.builder import graph
 from app.graph.state import build_initial_state
+from app.graph.nodes import layer_discoverer_node, wfs_discovery_node
 
 router = APIRouter(prefix="/api", tags=["agent"])
 logger = logging.getLogger(__name__)
@@ -111,3 +112,46 @@ async def spatial_chat(
             yield _format_sse_event("error", error_event)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+class LayerDiscoveryRequest(BaseModel):
+    query: str = Field(min_length=1)
+
+
+class LayerDiscoveryResult(BaseModel):
+    layer_name: str
+    validation_error: str | None = None
+    retrieval_mode: str | None = None
+    retrieval_top_score: float | None = None
+    retrieval_score_gap: float | None = None
+    retrieval_reason: str | None = None
+
+
+@router.post("/layer-discovery")
+async def layer_discovery(
+    payload: LayerDiscoveryRequest,
+    http_client_pool: HttpClientPool = Depends(get_http_client_pool),
+) -> LayerDiscoveryResult:
+    state: dict[str, Any] = {
+        "user_query": payload.query,
+        "layer_subject": payload.query,
+    }
+    config = {
+        "configurable": {
+            "wfs_http_client": http_client_pool.wfs,
+        }
+    }
+
+    discovery_updates = await wfs_discovery_node(state, config=config)
+    state.update(discovery_updates)
+
+    selector_updates = await layer_discoverer_node(state, config=config)
+
+    return LayerDiscoveryResult(
+        layer_name=str(selector_updates.get("selected_layer", "")),
+        validation_error=selector_updates.get("validation_error"),
+        retrieval_mode=selector_updates.get("retrieval_mode"),
+        retrieval_top_score=selector_updates.get("retrieval_top_score"),
+        retrieval_score_gap=selector_updates.get("retrieval_score_gap"),
+        retrieval_reason=selector_updates.get("retrieval_reason"),
+    )

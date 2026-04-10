@@ -31,6 +31,8 @@ from app.tools.layer_catalog import (
     render_basic_markdown_catalog,
     render_catalog_rows_as_markdown,
 )
+from app.tools.embedding_client import get_embeddings
+from app.tools.vector_store import get_layer_vector_store
 
 
 logger = logging.getLogger(__name__)
@@ -546,6 +548,22 @@ async def wfs_discovery_node(state: AgentState, config: RunnableConfig | None = 
         "layer_catalog_rows": catalog_rows,
         "validation_error": None,
     }
+
+    # Keep semantic index fresh in runtime (default every 24h), and recover from
+    # startup indexing failures by opportunistically indexing here.
+    try:
+        store = get_layer_vector_store()
+        reindex_hours = getattr(settings, "vector_reindex_hours", 24)
+        if store.should_reindex(max_age_hours=reindex_hours):
+            await store.index_layers(
+                cast(list[dict[str, str]], layers),
+                cast(list[dict[str, Any]], catalog_rows),
+                lambda texts: get_embeddings(texts, http_client=wfs_http_client),
+            )
+            logger.info("[wfs_discovery_node] semantic index refreshed; layer_count=%s", store.layer_count())
+    except Exception as exc:
+        logger.warning("[wfs_discovery_node] semantic index refresh failed: %s", exc)
+
     logger.debug("[wfs_discovery_node] output=%s", _as_json(output))
     return output
 
@@ -568,25 +586,68 @@ async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None
         logger.debug("[layer_discoverer_node] output=%s", _as_json(output))
         return output
 
-    # --- Pre-rank layers using fuzzy scoring ---
+    # --- Pre-rank layers using semantic vector search ---
     query_text = layer_subject or state.get("user_query", "")
-    scored_layers = [
-        (layer, _score_layer_against_query(layer, query_text))
-        for layer in available_layers
-    ]
-    scored_layers.sort(key=lambda pair: pair[1], reverse=True)
+    configurable = (config or {}).get("configurable") or {}
+    wfs_http_client = cast(httpx.AsyncClient | None, configurable.get("wfs_http_client"))
+    store = get_layer_vector_store()
 
-    retrieval_top_score = scored_layers[0][1] if scored_layers else 0.0
+    reindex_hours = getattr(settings, "vector_reindex_hours", 24)
+    if store.should_reindex(max_age_hours=reindex_hours):
+        catalog_rows_for_index = cast(list[dict[str, Any]], state.get("layer_catalog_rows") or [])
+        try:
+            await store.index_layers(
+                cast(list[dict[str, str]], available_layers),
+                catalog_rows_for_index,
+                lambda texts: get_embeddings(texts, http_client=wfs_http_client),
+            )
+            logger.info("[layer_discoverer_node] semantic index refreshed; layer_count=%s", store.layer_count())
+        except Exception as exc:
+            logger.warning("[layer_discoverer_node] semantic index unavailable: %s", exc)
+
+    if not store.is_indexed():
+        output = {
+            "selected_layer": "",
+            "validation_error": (
+                "Semantic layer index unavailable: unable to confidently map "
+                "layer_subject to available WFS layers"
+            ),
+            "final_response": _build_final_response(
+                summary=(
+                    "I could not initialize semantic layer search right now. "
+                    "Please try again shortly."
+                )
+            ),
+            "retrieval_mode": "semantic",
+            "retrieval_top_score": 0.0,
+            "retrieval_score_gap": 0.0,
+            "retrieval_reason": "semantic-index-unavailable",
+            "candidate_layers_for_llm_count": 0,
+        }
+        logger.debug("[layer_discoverer_node] output=%s", _as_json(output))
+        return output
+
+    query_embedding = await get_embeddings([query_text], http_client=wfs_http_client)
+    vector_top_k = getattr(settings, "vector_store_top_k", 8)
+    max_candidates = getattr(settings, "max_llm_candidates", 10)
+    semantic_results = store.search(query_embedding[0], top_k=vector_top_k)[:max_candidates]
+
+    retrieval_top_score = semantic_results[0]["score"] if semantic_results else 0.0
     retrieval_score_gap = (
-        (scored_layers[0][1] - scored_layers[1][1])
-        if len(scored_layers) > 1
+        (semantic_results[0]["score"] - semantic_results[1]["score"])
+        if len(semantic_results) > 1
         else retrieval_top_score
     )
     retrieval_reason = (
-        f"top={scored_layers[0][0].get('name', '')} score={retrieval_top_score:.3f} gap={retrieval_score_gap:.3f}"
-        if scored_layers
+        f"top={semantic_results[0]['layer_name']} score={retrieval_top_score:.3f} gap={retrieval_score_gap:.3f}"
+        if semantic_results
         else ""
     )
+
+    # Map semantic results back to full layer dicts
+    layer_by_name = {str(l.get("name", "")): l for l in available_layers}
+    scored_layer_names = [r["layer_name"] for r in semantic_results]
+    top_layers = [layer_by_name[name] for name in scored_layer_names if name in layer_by_name]
 
     # --- Early-exit gate: if best score is below threshold, skip LLM ---
     min_score = getattr(settings, "min_retrieval_score", 0.15)
@@ -603,7 +664,7 @@ async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None
                     "Please mention a clearer feature type (for example, hospitals, roads, or schools)."
                 )
             ),
-            "retrieval_mode": "catalog",
+            "retrieval_mode": "semantic",
             "retrieval_top_score": retrieval_top_score,
             "retrieval_score_gap": retrieval_score_gap,
             "retrieval_reason": retrieval_reason,
@@ -611,10 +672,6 @@ async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None
         }
         logger.debug("[layer_discoverer_node] early-exit: top_score=%.3f < min=%.3f", retrieval_top_score, min_score)
         return output
-
-    # --- Pass only top-N candidates to LLM ---
-    max_candidates = getattr(settings, "max_llm_candidates", 10)
-    top_layers = [layer for layer, _score in scored_layers[:max_candidates]]
 
     top_layer_names = {str(layer.get("name", "")) for layer in top_layers}
     catalog_rows: list[dict[str, Any]] = state.get("layer_catalog_rows") or []
@@ -678,7 +735,7 @@ async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None
                     "Please mention a clearer feature type (for example, hospitals, roads, or schools)."
                 )
             ),
-            "retrieval_mode": "catalog",
+            "retrieval_mode": "semantic",
             "retrieval_top_score": retrieval_top_score,
             "retrieval_score_gap": retrieval_score_gap,
             "retrieval_reason": retrieval_reason,
@@ -690,7 +747,7 @@ async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None
     output = {
         "selected_layer": chosen_layer,
         "validation_error": None,
-        "retrieval_mode": "catalog",
+        "retrieval_mode": "semantic",
         "retrieval_top_score": retrieval_top_score,
         "retrieval_score_gap": retrieval_score_gap,
         "retrieval_reason": retrieval_reason,

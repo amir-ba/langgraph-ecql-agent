@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     llm_prompt_cache_ttl_seconds: int = 3600
     llm_prompt_cache_max_entries: int = 512
 
+    embedding_model: str = "jina-embeddings-v2-base-de"
+    embedding_batch_size: int = 32
+    vector_store_top_k: int = 8
+    vector_reindex_hours: int = 24
+
     min_retrieval_score: float = 0.15
     max_llm_candidates: int = 10
 
