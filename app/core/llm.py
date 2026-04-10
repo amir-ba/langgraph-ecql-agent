@@ -203,6 +203,7 @@ async def ainvoke_llm(
     agent_state: "AgentState | None" = None,
     model_name: str | None = None,
     enable_prompt_cache: bool = False,
+    node_name: str | None = None,
 ) -> str | BaseModel:
     if output_schema is not None:
         if response_format is not None and response_format is not output_schema:
@@ -266,6 +267,13 @@ async def ainvoke_llm(
         agg["completion_tokens"] += usage.get("completion_tokens", 0)
         agg["total_tokens"] += usage.get("total_tokens", 0)
         agg["request_count"] += 1
+        if node_name:
+            by_node = agg.setdefault("by_node", {})
+            node_agg = by_node.setdefault(node_name, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "request_count": 0})
+            node_agg["prompt_tokens"] += usage.get("prompt_tokens", 0)
+            node_agg["completion_tokens"] += usage.get("completion_tokens", 0)
+            node_agg["total_tokens"] += usage.get("total_tokens", 0)
+            node_agg["request_count"] += 1
 
     content = _extract_message_content(response)
     logger.debug("[ainvoke_llm] extracted content type=%s", type(content).__name__)

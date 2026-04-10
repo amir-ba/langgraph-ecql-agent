@@ -4,7 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 class ECQLGeneration(BaseModel):
-    reasoning: str = Field(description="Why this ECQL was constructed")
+    reasoning: str = Field(default="", description="One-sentence rationale.")
     ecql_string: str = Field(description="The final valid ECQL filter")
 
 

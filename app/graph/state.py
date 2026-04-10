@@ -19,6 +19,7 @@ class AgentState(TypedDict):
     unresolved_target_ids: NotRequired[list[str]]
     available_layers: NotRequired[list[dict[str, str]]]
     layer_catalog_markdown: NotRequired[str]
+    layer_catalog_rows: NotRequired[list[dict[str, Any]]]
     retrieval_mode: NotRequired[str]
     retrieval_top_score: NotRequired[float | None]
     retrieval_score_gap: NotRequired[float | None]
@@ -35,7 +36,7 @@ class AgentState(TypedDict):
     wfs_request_url: NotRequired[str]
     wfs_result: NotRequired[dict[str, Any]]
 
-    aggregate_usage: NotRequired[dict[str, int]]  # keys: prompt_tokens, completion_tokens, total_tokens, request_count
+    aggregate_usage: NotRequired[dict[str, Any]]  # keys: prompt_tokens, completion_tokens, total_tokens, request_count, by_node
 
 
 def build_initial_state(user_query: str) -> AgentState:

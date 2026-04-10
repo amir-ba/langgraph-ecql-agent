@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -273,13 +274,54 @@ def render_basic_markdown_catalog(layers: list[dict[str, str]]) -> str:
     return _render_markdown_from_rows(_fallback_translation_rows(layers))
 
 
+def render_catalog_rows_as_markdown(rows: list[dict[str, Any]]) -> str:
+    """Render a pre-built list of translated catalog rows to markdown."""
+    return _render_markdown_from_rows(rows)
+
+
+def _parse_full_rows_from_markdown(markdown: str) -> list[dict[str, Any]]:
+    """Parse bilingual rows back from a rendered markdown catalog (cache-hit path)."""
+    rows: list[dict[str, Any]] = []
+    if not markdown.strip():
+        return rows
+    blocks = re.split(r"\n(?=- \*\*Layer ID:\*\*)", markdown)
+    for block in blocks:
+        id_match = re.search(r"- \*\*Layer ID:\*\*\s*`([^`]+)`", block)
+        if not id_match:
+            continue
+        name = _normalize_text(id_match.group(1))
+        if not name:
+            continue
+
+        def _extract(pattern: str) -> str:
+            m = re.search(pattern, block)
+            return _normalize_text(m.group(1)) if m else ""
+
+        de_title = _extract(r"\*\*DE Title:\*\*\s*(.+)")
+        en_title = _extract(r"\*\*EN Translation:\*\*\s*(.+)")
+        de_abstract = _extract(r"\*\*DE Abstract:\*\*\s*(.+)")
+        en_abstract = _extract(r"\*\*EN Abstract:\*\*\s*(.+)")
+        aliases_raw = _extract(r"\*\*Aliases:\*\*\s*(.+)")
+        aliases = [a.strip() for a in aliases_raw.split(",") if a.strip()] if aliases_raw else []
+
+        rows.append({
+            "name": name,
+            "de_title": de_title,
+            "en_title": en_title,
+            "de_abstract": de_abstract,
+            "en_abstract": en_abstract,
+            "aliases": aliases,
+        })
+    return rows
+
+
 async def generate_markdown_layer_catalog(
     layers: list[dict[str, str]],
     translator: LayerTranslator | None = None,
-) -> str:
+) -> tuple[str, list[dict[str, Any]]]:
     translate = translator or translate_layers_with_llm
     rows = await translate(layers)
-    return _render_markdown_from_rows(rows)
+    return _render_markdown_from_rows(rows), rows
 
 
 def is_catalog_stale(catalog_path: str, stale_after_hours: int = 8) -> bool:
@@ -299,15 +341,17 @@ async def ensure_markdown_layer_catalog(
     stale_after_hours: int = 8,
     translator: LayerTranslator | None = None,
     force_refresh: bool = False,
-) -> str:
+) -> tuple[str, list[dict[str, Any]]]:
     path = Path(catalog_path)
     if (not force_refresh) and path.exists() and not is_catalog_stale(catalog_path, stale_after_hours):
-        return path.read_text(encoding="utf-8")
+        markdown = path.read_text(encoding="utf-8")
+        rows = _parse_full_rows_from_markdown(markdown)
+        return markdown, rows
 
-    markdown = await generate_markdown_layer_catalog(layers=layers, translator=translator)
+    markdown, rows = await generate_markdown_layer_catalog(layers=layers, translator=translator)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(markdown, encoding="utf-8")
-    return markdown
+    return markdown, rows
 
 
 def parse_markdown_layer_catalog(markdown: str) -> list[dict[str, str]]:

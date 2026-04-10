@@ -82,6 +82,7 @@ def test_unified_router_analyzer_node_returns_spatial_entities(monkeypatch) -> N
         response_format=None,
         agent_state=None,
         model_name=None,
+        node_name=None,
     ):
         assert "geospatial AI assistant" in messages[0]["content"]
         assert output_schema is AnalyzedIntent
@@ -264,6 +265,7 @@ def test_unified_router_analyzer_node_returns_irrelevant_response(monkeypatch) -
         response_format=None,
         agent_state=None,
         model_name=None,
+        node_name=None,
     ):
         assert output_schema is AnalyzedIntent
         assert response_format is None
@@ -424,6 +426,7 @@ def test_layer_discoverer_node_selects_layer(monkeypatch) -> None:
         agent_state=None,
         model_name=None,
         enable_prompt_cache=None,
+        node_name=None,
     ):
         assert "Layer catalog markdown" in messages[1]["content"]
         assert response_format.__name__ == "LayerSelection"
@@ -434,7 +437,12 @@ def test_layer_discoverer_node_selects_layer(monkeypatch) -> None:
     updates = asyncio.run(layer_discoverer_node(
         {
             "user_query": "show states",
-            "layer_catalog_markdown": "# GeoServer Layer Catalog\n\n- **Layer ID:** `topp:states`",
+            "layer_catalog_rows": [
+                {"name": "topp:states", "de_title": "Grenzen", "en_title": "States",
+                 "de_abstract": "Staatsgrenzen", "en_abstract": "State boundaries", "aliases": ["states"]},
+                {"name": "topp:roads", "de_title": "Strassen", "en_title": "Roads",
+                 "de_abstract": "Strassennetz", "en_abstract": "Road network", "aliases": ["roads"]},
+            ],
             "available_layers": [
                 {"name": "topp:states", "title": "States", "abstract": "State boundaries"},
                 {"name": "topp:roads", "title": "Roads", "abstract": "Road network"},
@@ -458,6 +466,7 @@ def test_layer_discoverer_node_uses_layer_subject_primary_single_match(monkeypat
         agent_state=None,
         model_name=None,
         enable_prompt_cache=None,
+        node_name=None,
     ):
         assert "Layer subject:\nhospitals" in messages[1]["content"]
         return _Layer()
@@ -468,7 +477,13 @@ def test_layer_discoverer_node_uses_layer_subject_primary_single_match(monkeypat
         {
             "user_query": "find hospitals near bonn",
             "layer_subject": "hospitals",
-            "layer_catalog_markdown": "# GeoServer Layer Catalog\n\n- **Layer ID:** `city:hospitals`",
+            "layer_catalog_rows": [
+                {"name": "city:hospitals", "de_title": "Krankenhäuser", "en_title": "Hospitals",
+                 "de_abstract": "Gesundheitseinrichtungen", "en_abstract": "Healthcare facilities",
+                 "aliases": ["hospitals"]},
+                {"name": "city:roads", "de_title": "Strassen", "en_title": "Roads",
+                 "de_abstract": "Strassennetz", "en_abstract": "Road network", "aliases": ["roads"]},
+            ],
             "available_layers": [
                 {"name": "city:hospitals", "title": "Hospitals", "abstract": "Healthcare facilities"},
                 {"name": "city:roads", "title": "Roads", "abstract": "Road network"},
@@ -492,6 +507,7 @@ def test_layer_discoverer_node_uses_filtered_candidates_for_llm_tiebreak(monkeyp
         agent_state=None,
         model_name=None,
         enable_prompt_cache=None,
+        node_name=None,
     ):
         prompt = messages[1]["content"]
         assert "city:hospitals_general" in prompt
@@ -506,15 +522,16 @@ def test_layer_discoverer_node_uses_filtered_candidates_for_llm_tiebreak(monkeyp
         {
             "user_query": "find hospitals",
             "layer_subject": "hospitals",
-            "layer_catalog_markdown": (
-                "# GeoServer Layer Catalog\n\n"
-                "- **Layer ID:** `city:hospitals_general`\n"
-                "  - **EN Translation:** Hospitals\n"
-                "- **Layer ID:** `city:hospitals_specialized`\n"
-                "  - **EN Translation:** Specialized Hospitals\n"
-                "- **Layer ID:** `city:roads`\n"
-                "  - **EN Translation:** Roads"
-            ),
+            "layer_catalog_rows": [
+                {"name": "city:hospitals_general", "de_title": "Allgemeine Krankenhäuser",
+                 "en_title": "Hospitals", "de_abstract": "", "en_abstract": "All hospitals",
+                 "aliases": ["hospitals"]},
+                {"name": "city:hospitals_specialized", "de_title": "Spezialkliniken",
+                 "en_title": "Specialized Hospitals", "de_abstract": "", "en_abstract": "Specialized care",
+                 "aliases": ["specialized"]},
+                {"name": "city:roads", "de_title": "Strassen", "en_title": "Roads",
+                 "de_abstract": "Strassennetz", "en_abstract": "Road network", "aliases": ["roads"]},
+            ],
             "available_layers": [
                 {
                     "name": "city:hospitals_general",
@@ -547,6 +564,7 @@ def test_layer_discoverer_node_falls_back_to_full_list_when_subject_has_no_match
         agent_state=None,
         model_name=None,
         enable_prompt_cache=None,
+        node_name=None,
     ):
         prompt = messages[1]["content"]
         assert "Layer subject:\nschools" in prompt
@@ -561,13 +579,12 @@ def test_layer_discoverer_node_falls_back_to_full_list_when_subject_has_no_match
         {
             "user_query": "find schools",
             "layer_subject": "schools",
-            "layer_catalog_markdown": (
-                "# GeoServer Layer Catalog\n\n"
-                "- **Layer ID:** `city:hospitals`\n"
-                "  - **EN Translation:** Hospitals\n"
-                "- **Layer ID:** `city:roads`\n"
-                "  - **EN Translation:** Roads"
-            ),
+            "layer_catalog_rows": [
+                {"name": "city:hospitals", "de_title": "Krankenhäuser", "en_title": "Hospitals",
+                 "de_abstract": "", "en_abstract": "Healthcare facilities", "aliases": ["hospitals"]},
+                {"name": "city:roads", "de_title": "Strassen", "en_title": "Roads",
+                 "de_abstract": "Strassennetz", "en_abstract": "Road network", "aliases": ["roads"]},
+            ],
             "available_layers": [
                 {"name": "city:hospitals", "title": "Hospitals", "abstract": "Healthcare facilities"},
                 {"name": "city:roads", "title": "Roads", "abstract": "Road network"},
@@ -590,6 +607,7 @@ def test_layer_discoverer_node_gracefully_falls_back_on_low_confidence(monkeypat
         response_format,
         agent_state=None,
         enable_prompt_cache=None,
+        node_name=None,
     ):
         assert "Layer catalog markdown" in messages[1]["content"]
         return _Layer()
@@ -600,7 +618,12 @@ def test_layer_discoverer_node_gracefully_falls_back_on_low_confidence(monkeypat
         {
             "user_query": "find hospitals",
             "layer_subject": "hospitals",
-            "layer_catalog_markdown": "# GeoServer Layer Catalog\n\n- **Layer ID:** `city:roads`",
+            "layer_catalog_rows": [
+                {"name": "city:roads", "de_title": "Strassen", "en_title": "Roads",
+                 "de_abstract": "Strassennetz", "en_abstract": "Road network", "aliases": ["roads"]},
+                {"name": "city:lakes", "de_title": "Seen", "en_title": "Lakes",
+                 "de_abstract": "Gewässer", "en_abstract": "Water bodies", "aliases": ["lakes"]},
+            ],
             "available_layers": [
                 {"name": "city:roads", "title": "Roads", "abstract": "Road network"},
                 {"name": "city:lakes", "title": "Lakes", "abstract": "Water bodies"},
@@ -644,7 +667,7 @@ def test_schema_extractor_node_calls_get_layer_schema(monkeypatch) -> None:
 
 
 def test_ecql_generator_node_increments_retry_and_returns_ecql(monkeypatch) -> None:
-    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None):
+    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None, node_name=None):
         prompt = messages[1]["content"]
         assert "Previous validation error" in messages[1]["content"]
         assert "Attribute hints" in prompt
@@ -689,7 +712,7 @@ def test_ecql_generator_node_increments_retry_and_returns_ecql(monkeypatch) -> N
 
 
 def test_ecql_generator_node_builds_multi_spatial_ecql(monkeypatch) -> None:
-    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None):
+    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None, node_name=None):
         assert response_format is ECQLGeneration
         return ECQLGeneration(reasoning="Use attributes only", ecql_string="PERSONS > 1000")
 
@@ -748,7 +771,7 @@ def test_ecql_generator_node_builds_multi_spatial_ecql(monkeypatch) -> None:
 
 
 def test_ecql_generator_node_avoids_duplicate_bbox_for_duplicated_reference_context(monkeypatch) -> None:
-    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None):
+    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None, node_name=None):
         assert response_format is ECQLGeneration
         return ECQLGeneration(reasoning="Use attributes only", ecql_string="manager = 'NBG-Maps'")
 
@@ -797,7 +820,7 @@ def test_ecql_generator_node_avoids_duplicate_bbox_for_duplicated_reference_cont
 
 
 def test_synthesizer_node_returns_llm_summary(monkeypatch) -> None:
-    async def fake_ainvoke_llm(*, messages, response_format=None, agent_state=None, model_name=None):
+    async def fake_ainvoke_llm(*, messages, response_format=None, agent_state=None, model_name=None, node_name=None):
         assert response_format is None
         assert "Feature count" in messages[1]["content"]
         return "Found 2 matching features in the requested area."
@@ -844,12 +867,23 @@ def test_wfs_discovery_node_populates_available_layers(monkeypatch) -> None:
         assert password == "demo-pass"
         return [{"name": "topp:states", "title": "States", "abstract": "Boundaries"}]
 
+    async def fake_ensure_markdown_layer_catalog(*, layers, catalog_path, stale_after_hours):
+        return "# GeoServer Layer Catalog\n\n- **Layer ID:** `topp:states`\n", [
+            {"name": "topp:states", "de_title": "Grenzen", "en_title": "States",
+             "de_abstract": "Staatsgrenzen", "en_abstract": "State boundaries", "aliases": ["states"]},
+        ]
+
     monkeypatch.setattr("app.graph.nodes.discover_layers", fake_discover_layers)
+    monkeypatch.setattr("app.graph.nodes.ensure_markdown_layer_catalog", fake_ensure_markdown_layer_catalog)
 
     updates = asyncio.run(wfs_discovery_node({"user_query": "find states"}))
 
     assert updates["available_layers"][0]["name"] == "topp:states"
     assert updates["validation_error"] is None
+    assert "layer_catalog_rows" in updates
+    assert isinstance(updates["layer_catalog_rows"], list)
+    assert updates["layer_catalog_rows"][0]["name"] == "topp:states"
+    assert updates["layer_catalog_rows"][0]["en_title"] == "States"
 
 
 def test_wfs_executor_node_returns_wfs_result(monkeypatch) -> None:
@@ -1037,13 +1071,12 @@ def test_layer_discoverer_node_returns_fallback_without_llm_when_scores_too_low(
         {
             "user_query": "find xyzzy quantum flux capacitors",
             "layer_subject": "xyzzy quantum flux capacitors",
-            "layer_catalog_markdown": (
-                "# GeoServer Layer Catalog\n\n"
-                "- **Layer ID:** `city:hospitals`\n"
-                "  - **EN Translation:** Hospitals\n"
-                "- **Layer ID:** `city:roads`\n"
-                "  - **EN Translation:** Roads"
-            ),
+            "layer_catalog_rows": [
+                {"name": "city:hospitals", "de_title": "Krankenhäuser", "en_title": "Hospitals",
+                 "de_abstract": "", "en_abstract": "Healthcare", "aliases": ["hospitals"]},
+                {"name": "city:roads", "de_title": "Strassen", "en_title": "Roads",
+                 "de_abstract": "Strassennetz", "en_abstract": "Road network", "aliases": ["roads"]},
+            ],
             "available_layers": [
                 {"name": "city:hospitals", "title": "Hospitals", "abstract": "Healthcare"},
                 {"name": "city:roads", "title": "Roads", "abstract": "Road network"},
@@ -1083,13 +1116,12 @@ def test_layer_discoverer_node_populates_scores_on_success(monkeypatch) -> None:
         {
             "user_query": "find hospitals",
             "layer_subject": "hospitals",
-            "layer_catalog_markdown": (
-                "# GeoServer Layer Catalog\n\n"
-                "- **Layer ID:** `city:hospitals`\n"
-                "  - **EN Translation:** Hospitals\n"
-                "- **Layer ID:** `city:roads`\n"
-                "  - **EN Translation:** Roads"
-            ),
+            "layer_catalog_rows": [
+                {"name": "city:hospitals", "de_title": "Krankenhäuser", "en_title": "Hospitals",
+                 "de_abstract": "", "en_abstract": "Healthcare", "aliases": ["hospitals"]},
+                {"name": "city:roads", "de_title": "Strassen", "en_title": "Roads",
+                 "de_abstract": "Strassennetz", "en_abstract": "Road network", "aliases": ["roads"]},
+            ],
             "available_layers": [
                 {"name": "city:hospitals", "title": "Hospitals", "abstract": "Healthcare"},
                 {"name": "city:roads", "title": "Roads", "abstract": "Road network"},
@@ -1101,4 +1133,190 @@ def test_layer_discoverer_node_populates_scores_on_success(monkeypatch) -> None:
     assert updates["retrieval_top_score"] is not None
     assert updates["retrieval_top_score"] > 0.15
     assert updates["retrieval_score_gap"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Phase 1b — Catalog slicing: only top-N rows reach LLM
+# ---------------------------------------------------------------------------
+
+
+def test_layer_discoverer_node_sends_only_top_n_rows_to_llm(monkeypatch) -> None:
+    """Rows for layers NOT in available_layers must not appear in the LLM catalog prompt."""
+    captured_prompt: list[str] = []
+
+    class _Layer:
+        layer_name = "city:hospitals"
+        confidence = "high"
+
+    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None,
+                                enable_prompt_cache=None, node_name=None, **kwargs):
+        captured_prompt.append(messages[1]["content"])
+        return _Layer()
+
+    monkeypatch.setattr("app.graph.nodes.ainvoke_llm", fake_ainvoke_llm)
+
+    updates = asyncio.run(layer_discoverer_node(
+        {
+            "user_query": "find hospitals",
+            "layer_subject": "hospitals",
+            # catalog_rows has 4 rows but only 2 layers are "available"
+            "layer_catalog_rows": [
+                {"name": "city:hospitals", "de_title": "Krankenhäuser", "en_title": "Hospitals",
+                 "de_abstract": "", "en_abstract": "Healthcare", "aliases": ["hospitals"]},
+                {"name": "city:roads", "de_title": "Strassen", "en_title": "Roads",
+                 "de_abstract": "Strassennetz", "en_abstract": "Road network", "aliases": ["roads"]},
+                # These two are stale rows that no longer exist in the server
+                {"name": "city:parks", "de_title": "Parks", "en_title": "Parks",
+                 "de_abstract": "Grünanlagen", "en_abstract": "City parks", "aliases": ["parks"]},
+                {"name": "city:lakes", "de_title": "Seen", "en_title": "Lakes",
+                 "de_abstract": "Gewässer", "en_abstract": "Water bodies", "aliases": ["lakes"]},
+            ],
+            "available_layers": [
+                {"name": "city:hospitals", "title": "Hospitals", "abstract": "Healthcare"},
+                {"name": "city:roads", "title": "Roads", "abstract": "Road network"},
+            ],
+        }
+    ))
+
+    assert updates["selected_layer"] == "city:hospitals"
+    assert len(captured_prompt) == 1
+    prompt = captured_prompt[0]
+    # Only available layers should appear in catalog portion
+    assert "city:hospitals" in prompt
+    assert "city:roads" in prompt
+    # Stale rows absent from available_layers must NOT appear
+    assert "city:parks" not in prompt
+    assert "city:lakes" not in prompt
+
+
+def test_layer_discoverer_node_falls_back_to_basic_catalog_when_no_rows_in_state(monkeypatch) -> None:
+    """When layer_catalog_rows is absent, render_basic_markdown_catalog(top_layers) is used."""
+    captured_prompt: list[str] = []
+
+    class _Layer:
+        layer_name = "city:hospitals"
+        confidence = "high"
+
+    async def fake_ainvoke_llm(*, messages, response_format, agent_state=None,
+                                enable_prompt_cache=None, node_name=None, **kwargs):
+        captured_prompt.append(messages[1]["content"])
+        return _Layer()
+
+    monkeypatch.setattr("app.graph.nodes.ainvoke_llm", fake_ainvoke_llm)
+
+    updates = asyncio.run(layer_discoverer_node(
+        {
+            "user_query": "find hospitals",
+            "layer_subject": "hospitals",
+            # no layer_catalog_rows in state
+            "available_layers": [
+                {"name": "city:hospitals", "title": "Hospitals", "abstract": "Healthcare"},
+                {"name": "city:roads", "title": "Roads", "abstract": "Road network"},
+            ],
+        }
+    ))
+
+    assert updates["selected_layer"] == "city:hospitals"
+    assert len(captured_prompt) == 1
+    # Basic catalog still includes layer names
+    assert "city:hospitals" in captured_prompt[0]
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Per-node token tracking
+# ---------------------------------------------------------------------------
+
+
+def test_ainvoke_llm_tracks_per_node_usage(monkeypatch) -> None:
+    """When node_name is passed, aggregate_usage.by_node is populated per node."""
+    import asyncio as _asyncio
+    from app.core.llm import ainvoke_llm
+    from app.graph.state import build_initial_state
+
+    class _FakeUsage:
+        def get(self, key, default=0):
+            return {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}.get(key, default)
+
+    class _FakeResponse:
+        usage = _FakeUsage()
+        choices = [type("C", (), {"message": type("M", (), {"content": "hello"})()})()]
+
+    async def fake_acompletion(**kwargs):
+        return _FakeResponse()
+
+    monkeypatch.setattr("app.core.llm.acompletion", fake_acompletion)
+    monkeypatch.setattr(
+        "app.core.llm.get_settings",
+        lambda: type("S", (), {
+            "current_model": "gpt-4.1",
+            "llm_base_url": "",
+            "llm_api_key": "",
+            "openai_api_key": "key",
+            "llm_prompt_cache_enabled": False,
+        })(),
+    )
+
+    state = build_initial_state("test")
+
+    _asyncio.run(ainvoke_llm(
+        messages=[{"role": "user", "content": "hello"}],
+        agent_state=state,
+        node_name="ecql_generator_node",
+    ))
+    _asyncio.run(ainvoke_llm(
+        messages=[{"role": "user", "content": "hello"}],
+        agent_state=state,
+        node_name="ecql_generator_node",
+    ))
+    _asyncio.run(ainvoke_llm(
+        messages=[{"role": "user", "content": "hello"}],
+        agent_state=state,
+        node_name="synthesizer_node",
+    ))
+
+    agg = state["aggregate_usage"]
+    assert agg["prompt_tokens"] == 300
+    assert agg["completion_tokens"] == 60
+    assert agg["request_count"] == 3
+
+    by_node = agg["by_node"]
+    assert by_node["ecql_generator_node"]["prompt_tokens"] == 200
+    assert by_node["ecql_generator_node"]["request_count"] == 2
+    assert by_node["synthesizer_node"]["prompt_tokens"] == 100
+    assert by_node["synthesizer_node"]["request_count"] == 1
+
+
+def test_ainvoke_llm_skips_by_node_when_no_node_name(monkeypatch) -> None:
+    """Without node_name, by_node should not be created."""
+    import asyncio as _asyncio
+    from app.core.llm import ainvoke_llm
+    from app.graph.state import build_initial_state
+
+    class _FakeUsage:
+        def get(self, key, default=0):
+            return {"prompt_tokens": 50, "completion_tokens": 10, "total_tokens": 60}.get(key, default)
+
+    class _FakeResponse:
+        usage = _FakeUsage()
+        choices = [type("C", (), {"message": type("M", (), {"content": "hi"})()})()]
+
+    async def fake_acompletion(**kwargs):
+        return _FakeResponse()
+
+    monkeypatch.setattr("app.core.llm.acompletion", fake_acompletion)
+    monkeypatch.setattr(
+        "app.core.llm.get_settings",
+        lambda: type("S", (), {
+            "current_model": "gpt-4.1",
+            "llm_base_url": "",
+            "llm_api_key": "",
+            "openai_api_key": "key",
+            "llm_prompt_cache_enabled": False,
+        })(),
+    )
+
+    state = build_initial_state("test")
+    _asyncio.run(ainvoke_llm(messages=[{"role": "user", "content": "hi"}], agent_state=state))
+
+    assert "by_node" not in state["aggregate_usage"]
 

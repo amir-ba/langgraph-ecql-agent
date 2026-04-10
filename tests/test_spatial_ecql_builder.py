@@ -335,3 +335,34 @@ def test_build_spatial_ecql_returns_none_for_required_unresolved_predicate() -> 
     ]
 
     assert build_spatial_ecql("the_geom", spatial_contexts, spatial_predicates) is None
+
+def test_build_spatial_ecql_returns_none_for_required_resolved_predicate() -> None:
+    spatial_contexts = [
+        {
+            "target_id": "g1",
+            "source": "explicit_geometry",
+            "crs": "EPSG:4326",
+            "bbox": [9.885700226604778, 53.488887087743024, 10.19984853154607, 53.66693838494277],
+            "geometry_wkt": "SRID=4326;POLYGON ((9.920605593820474 53.571794977602735, 10.018340462240342 53.488887087743024, 10.19984853154607 53.638004488172925, 9.885700226604778 53.66693838494277, 9.920605593820474 53.571794977602735))",
+            "geometry_type": "Polygon"
+        }
+    ]
+    spatial_predicates = [
+        {
+        "id": "p1",
+        "predicate": "DWITHIN",
+        "target_ids": ["g1"],
+        "distance": 5.0,
+        "units": "kilometers",
+        "join_with_next": "AND",
+        "required": True
+        }
+    ]
+
+    ecql = build_spatial_ecql("the_geom", spatial_contexts, spatial_predicates)
+    assert ecql is not None
+    assert "DWITHIN(the_geom, SRID=4326;POLYGON ((9.920605593820474 53.571794977602735" in ecql
+    assert "BBOX" not in ecql
+
+
+

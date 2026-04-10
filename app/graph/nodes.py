@@ -29,6 +29,7 @@ from app.tools.wfs_client import (
 from app.tools.layer_catalog import (
     ensure_markdown_layer_catalog,
     render_basic_markdown_catalog,
+    render_catalog_rows_as_markdown,
 )
 
 
@@ -88,7 +89,7 @@ class LayerSelection(BaseModel):
     )
     reasoning: str = Field(
         default="",
-        description="Short explanation of why this layer was selected",
+        description="One-sentence rationale.",
     )
     score: float = Field(
         default=0.0,
@@ -209,6 +210,7 @@ async def unified_router_analyzer_node(state: AgentState, config: RunnableConfig
             output_schema=AnalyzedIntent,
             agent_state=state,
             model_name=routing_model,
+            node_name="unified_router_analyzer_node",
         ),
     )
     final_payload: FinalResponsePayload | None = None
@@ -526,8 +528,9 @@ async def wfs_discovery_node(state: AgentState, config: RunnableConfig | None = 
         return output
 
     catalog_markdown = ""
+    catalog_rows: list[dict[str, Any]] = []
     try:
-        catalog_markdown = await ensure_markdown_layer_catalog(
+        catalog_markdown, catalog_rows = await ensure_markdown_layer_catalog(
             layers=layers,
             catalog_path=getattr(settings, "layer_catalog_markdown_path", "layer_catalog.md"),
             stale_after_hours=getattr(settings, "layer_catalog_stale_after_hours", 8),
@@ -535,10 +538,12 @@ async def wfs_discovery_node(state: AgentState, config: RunnableConfig | None = 
     except Exception as exc:
         logger.warning("[wfs_discovery_node] markdown catalog refresh failed: %s", exc)
         catalog_markdown = render_basic_markdown_catalog(layers)
+        catalog_rows = []
 
     output = {
         "available_layers": layers,
         "layer_catalog_markdown": catalog_markdown,
+        "layer_catalog_rows": catalog_rows,
         "validation_error": None,
     }
     logger.debug("[wfs_discovery_node] output=%s", _as_json(output))
@@ -611,9 +616,13 @@ async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None
     max_candidates = getattr(settings, "max_llm_candidates", 10)
     top_layers = [layer for layer, _score in scored_layers[:max_candidates]]
 
-    catalog_markdown = str(state.get("layer_catalog_markdown") or "")
-    if not catalog_markdown:
-        catalog_markdown = render_basic_markdown_catalog(available_layers)
+    top_layer_names = {str(layer.get("name", "")) for layer in top_layers}
+    catalog_rows: list[dict[str, Any]] = state.get("layer_catalog_rows") or []
+    if catalog_rows:
+        top_rows = [r for r in catalog_rows if str(r.get("name", "")) in top_layer_names]
+        catalog_markdown = render_catalog_rows_as_markdown(top_rows) if top_rows else render_basic_markdown_catalog(top_layers)
+    else:
+        catalog_markdown = render_basic_markdown_catalog(top_layers)
 
     messages = [
         {
@@ -644,6 +653,7 @@ async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None
             response_format=LayerSelection,
             agent_state=state,
             enable_prompt_cache=True,
+            node_name="layer_discoverer_node",
         ),
     )
 
@@ -766,7 +776,7 @@ async def ecql_generator_node(state: AgentState, config: RunnableConfig | None =
 
     result = cast(
         ECQLGeneration,
-        await ainvoke_llm(messages=messages, response_format=ECQLGeneration, agent_state=state),
+        await ainvoke_llm(messages=messages, response_format=ECQLGeneration, agent_state=state, node_name="ecql_generator_node"),
     )
 
     attribute_ecql = result.ecql_string.strip()
@@ -968,7 +978,7 @@ async def synthesizer_node(state: AgentState, config: RunnableConfig | None = No
 
     settings = get_settings()
     synthesizer_model = settings.synthesizer_model.strip() or settings.current_model
-    summary = await ainvoke_llm(messages=messages, agent_state=state, model_name=synthesizer_model)
+    summary = await ainvoke_llm(messages=messages, agent_state=state, model_name=synthesizer_model, node_name="synthesizer_node")
     # Log aggregate usage before final response
     logger.debug("[synthesizer_node] aggregate_usage=%s", json.dumps(state.get("aggregate_usage", {})))
     output = {

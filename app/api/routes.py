@@ -25,13 +25,11 @@ def _format_sse_event(event: str, payload: dict[str, object]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=True)}\n\n"
 
 
-def _normalize_final_response(value: Any, fallback_summary: str) -> dict[str, object]:
+def _normalize_final_response(value: Any, fallback_summary: str) -> dict[str, str]:
     if isinstance(value, dict):
         summary = value.get("summary")
         result = {"summary": str(summary) if summary is not None else fallback_summary}
-        if "geojson" in value:
-            geojson = value.get("geojson")
-            result["geojson"] = geojson if isinstance(geojson, dict) or geojson is None else None
+
         return result
 
     if isinstance(value, str):
@@ -48,6 +46,8 @@ def _sanitize_update_payload(value: Any) -> Any:
                 sanitized["available_layers_count"] = len(item)
                 continue
             if key == "layer_catalog_markdown":
+                continue
+            if key == "layer_catalog_rows":
                 continue
             sanitized[key] = _sanitize_update_payload(item)
         return sanitized

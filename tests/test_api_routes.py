@@ -156,6 +156,10 @@ def test_spatial_chat_redacts_available_layers_to_count(monkeypatch) -> None:
                         {"name": "layer_2", "title": "Layer Two", "abstract": ""},
                     ],
                     "layer_catalog_markdown": "# Catalog\n- layer_1\n- layer_2",
+                    "layer_catalog_rows": [
+                        {"name": "layer_1", "de_title": "Ebene Eins", "en_title": "Layer One"},
+                        {"name": "layer_2", "de_title": "Ebene Zwei", "en_title": "Layer Two"},
+                    ],
                 }
             }
 

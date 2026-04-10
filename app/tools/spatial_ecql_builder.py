@@ -266,14 +266,10 @@ def _build_single_spatial_ecql(
         units = spatial_filter.get("units")
         if isinstance(distance, int | float) and distance > 0 and isinstance(units, str) and isinstance(ewkt, str):
             fine_ecql = f"{predicate}({geom_column}, {ewkt}, {distance}, {units})"
-            if geometry_type.strip().lower() == "point" or (isinstance(raw_wkt, str) and raw_wkt.upper().startswith("POINT")):
-                return fine_ecql, False
-            if bbox_ecql is None:
-                return fine_ecql, False
-            return f"({bbox_ecql}) AND ({fine_ecql})", False
-        if bbox_ecql is not None:
+        elif bbox_ecql is not None:
             return bbox_ecql, True
-        return None, False
+        else:
+            return None, False
 
     topological = {
         "INTERSECTS",
@@ -310,6 +306,8 @@ def _build_single_spatial_ecql(
             return fine_ecql, False
         return f"({bbox_ecql}) AND ({fine_ecql})", False
 
-    if bbox_ecql is not None:
+    if fine_ecql is None and bbox_ecql is not None:
         return bbox_ecql, True
+    elif fine_ecql is not None:
+        return fine_ecql, False
     return None, False

@@ -55,7 +55,7 @@ def test_lifespan_initializes_markdown_catalog(monkeypatch, tmp_path: Path) -> N
         called["layers"] = layers
         called["catalog_path"] = catalog_path
         called["stale_after_hours"] = stale_after_hours
-        return "# GeoServer Layer Catalog"
+        return "# GeoServer Layer Catalog", []
 
     monkeypatch.setattr(main, "discover_layers", fake_discover_layers)
     monkeypatch.setattr(main, "ensure_markdown_layer_catalog", fake_ensure_markdown_layer_catalog)

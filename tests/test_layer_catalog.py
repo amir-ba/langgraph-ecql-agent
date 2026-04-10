@@ -7,8 +7,10 @@ from app.tools.layer_catalog import (
     LayerTranslationRow,
     _fallback_translation_rows,
     _has_translation_occurred,
+    _parse_full_rows_from_markdown,
     ensure_markdown_layer_catalog,
     parse_markdown_layer_catalog,
+    render_catalog_rows_as_markdown,
     translate_layers_with_llm,
 )
 
@@ -33,7 +35,7 @@ def test_ensure_markdown_layer_catalog_creates_file_when_missing(tmp_path: Path)
     catalog_path = tmp_path / "layer_catalog.md"
     layers = [{"name": "city:roads", "title": "Strassen", "abstract": "Strassennetz"}]
 
-    markdown = asyncio.run(
+    markdown, rows = asyncio.run(
         ensure_markdown_layer_catalog(
             layers=layers,
             catalog_path=str(catalog_path),
@@ -46,13 +48,18 @@ def test_ensure_markdown_layer_catalog_creates_file_when_missing(tmp_path: Path)
     assert "# GeoServer Layer Catalog" in markdown
     assert "city:roads" in markdown
     assert "EN Strassen" in markdown
+    assert len(rows) == 1
+    assert rows[0]["name"] == "city:roads"
 
 
 def test_ensure_markdown_layer_catalog_reuses_fresh_file(tmp_path: Path) -> None:
     catalog_path = tmp_path / "layer_catalog.md"
-    catalog_path.write_text("# GeoServer Layer Catalog\n\n- **Layer ID:** `city:roads`\n", encoding="utf-8")
+    catalog_path.write_text(
+        "# GeoServer Layer Catalog\n\n- **Layer ID:** `city:roads`\n  - **DE Title:** Strassen\n  - **EN Translation:** Roads\n  - **DE Abstract:** Strassennetz\n  - **EN Abstract:** Road network\n",
+        encoding="utf-8",
+    )
 
-    markdown = asyncio.run(
+    markdown, rows = asyncio.run(
         ensure_markdown_layer_catalog(
             layers=[{"name": "city:lakes", "title": "Seen", "abstract": "Wasser"}],
             catalog_path=str(catalog_path),
@@ -63,6 +70,9 @@ def test_ensure_markdown_layer_catalog_reuses_fresh_file(tmp_path: Path) -> None
 
     assert "city:roads" in markdown
     assert "city:lakes" not in markdown
+    assert len(rows) == 1
+    assert rows[0]["name"] == "city:roads"
+    assert rows[0]["en_title"] == "Roads"
 
 
 def test_ensure_markdown_layer_catalog_regenerates_stale_file(tmp_path: Path) -> None:
@@ -76,7 +86,7 @@ def test_ensure_markdown_layer_catalog_regenerates_stale_file(tmp_path: Path) ->
 
     os.utime(catalog_path, (timestamp, timestamp))
 
-    markdown = asyncio.run(
+    markdown, rows = asyncio.run(
         ensure_markdown_layer_catalog(
             layers=[{"name": "city:new", "title": "Neu", "abstract": "Beschreibung"}],
             catalog_path=str(catalog_path),
@@ -87,6 +97,8 @@ def test_ensure_markdown_layer_catalog_regenerates_stale_file(tmp_path: Path) ->
 
     assert "city:new" in markdown
     assert "city:old" not in markdown
+    assert len(rows) == 1
+    assert rows[0]["name"] == "city:new"
 
 
 def test_parse_markdown_layer_catalog_extracts_layer_fields() -> None:
@@ -261,3 +273,87 @@ def test_translate_layers_with_llm_skips_repair_when_translation_ok(monkeypatch)
     assert call_count == 1, "No repair should fire when translations already differ"
     assert translated[0]["en_title"] == "Roads"
     assert translated[0]["translation_verified"] is True
+
+
+def test_parse_full_rows_from_markdown_extracts_bilingual_fields() -> None:
+    markdown = """# GeoServer Layer Catalog
+
+- **Layer ID:** `city:hospitals`
+  - **DE Title:** Krankenhäuser
+  - **EN Translation:** Hospitals
+  - **DE Abstract:** Gesundheitseinrichtungen
+  - **EN Abstract:** Healthcare facilities
+  - **Aliases:** krankenhäuser, hospitals
+
+- **Layer ID:** `city:roads`
+  - **DE Title:** Strassen
+  - **EN Translation:** Roads
+  - **DE Abstract:** Strassennetz
+  - **EN Abstract:** Road network
+"""
+
+    rows = _parse_full_rows_from_markdown(markdown)
+
+    assert len(rows) == 2
+    assert rows[0]["name"] == "city:hospitals"
+    assert rows[0]["de_title"] == "Krankenhäuser"
+    assert rows[0]["en_title"] == "Hospitals"
+    assert rows[0]["de_abstract"] == "Gesundheitseinrichtungen"
+    assert rows[0]["en_abstract"] == "Healthcare facilities"
+    assert "krankenhäuser" in rows[0]["aliases"]
+    assert rows[1]["name"] == "city:roads"
+    assert rows[1]["en_title"] == "Roads"
+
+
+def test_parse_full_rows_from_markdown_returns_empty_for_blank_input() -> None:
+    assert _parse_full_rows_from_markdown("") == []
+    assert _parse_full_rows_from_markdown("   ") == []
+
+
+def test_render_catalog_rows_as_markdown_produces_labeled_output() -> None:
+    rows = [
+        {
+            "name": "city:hospitals",
+            "de_title": "Krankenhäuser",
+            "en_title": "Hospitals",
+            "de_abstract": "Gesundheitseinrichtungen",
+            "en_abstract": "Healthcare facilities",
+            "aliases": ["hospitals", "krankenhäuser"],
+        }
+    ]
+
+    markdown = render_catalog_rows_as_markdown(rows)
+
+    assert "city:hospitals" in markdown
+    assert "Hospitals" in markdown
+    assert "Healthcare facilities" in markdown
+    assert "hospitals" in markdown
+
+
+def test_ensure_markdown_layer_catalog_returns_rows_on_cache_hit(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "layer_catalog.md"
+    catalog_path.write_text(
+        "# GeoServer Layer Catalog\n\n"
+        "- **Layer ID:** `city:roads`\n"
+        "  - **DE Title:** Strassen\n"
+        "  - **EN Translation:** Roads\n"
+        "  - **DE Abstract:** Strassennetz\n"
+        "  - **EN Abstract:** Road network\n"
+        "  - **Aliases:** strassen, roads\n",
+        encoding="utf-8",
+    )
+
+    markdown, rows = asyncio.run(
+        ensure_markdown_layer_catalog(
+            layers=[],
+            catalog_path=str(catalog_path),
+            stale_after_hours=8,
+            translator=_fake_translator,
+        )
+    )
+
+    assert "city:roads" in markdown
+    assert len(rows) == 1
+    assert rows[0]["name"] == "city:roads"
+    assert rows[0]["en_title"] == "Roads"
+    assert "roads" in rows[0]["aliases"]
