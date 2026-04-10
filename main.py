@@ -33,6 +33,8 @@ from app.core.http_clients import create_http_client_pool
 from app.core.settings import get_settings
 from app.tools.layer_catalog import ensure_markdown_layer_catalog
 from app.tools.wfs_client import discover_layers
+from app.tools.embedding_client import get_embeddings
+from app.tools.vector_store import get_layer_vector_store
 
 
 @asynccontextmanager
@@ -47,7 +49,7 @@ async def lifespan(app: FastAPI):
                 username=settings.geoserver_wfs_username,
                 password=settings.geoserver_wfs_password,
             )
-            await ensure_markdown_layer_catalog(
+            catalog_markdown, catalog_rows = await ensure_markdown_layer_catalog(
                 layers=layers,
                 catalog_path=settings.layer_catalog_markdown_path,
                 stale_after_hours=settings.layer_catalog_stale_after_hours,
@@ -55,9 +57,15 @@ async def lifespan(app: FastAPI):
             logging.getLogger("app.main").info(
                 "Layer markdown catalog ready with %s layers", len(layers)
             )
+
+            store = get_layer_vector_store()
+            await store.index_layers(layers, catalog_rows, get_embeddings)
+            logging.getLogger("app.main").info(
+                "Vector store indexed with %s layers", store.layer_count()
+            )
         except Exception as exc:
             logging.getLogger("app.main").warning(
-                "Layer markdown catalog initialization failed: %s", exc
+                "Layer catalog / vector store initialization failed: %s", exc
             )
         yield
     finally:
