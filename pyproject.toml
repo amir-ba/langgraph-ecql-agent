@@ -3,7 +3,6 @@ name = "geoserver-agent"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
-    "chromadb>=1.5.7",
     "fastapi>=0.135.1",
     "httpx>=0.28.1",
     "langgraph>=1.1.0",
@@ -22,7 +21,4 @@ dependencies = [
 required-environments = [
     "sys_platform == 'win32'",
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
-]
-override-dependencies = [
-    "onnxruntime>=1.24.4; sys_platform == 'win32'",
 ]

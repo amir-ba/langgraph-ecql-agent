@@ -27,7 +27,7 @@ def test_layer_discovery_endpoint_returns_matches(monkeypatch) -> None:
         return {
             "selected_layer": "city:hospitals",
             "validation_error": None,
-            "retrieval_mode": "semantic",
+            "retrieval_mode": "fuzzy",
             "retrieval_top_score": 0.93,
             "retrieval_score_gap": 0.42,
             "retrieval_reason": "top=city:hospitals score=0.930 gap=0.420",
@@ -43,7 +43,7 @@ def test_layer_discovery_endpoint_returns_matches(monkeypatch) -> None:
     data = resp.json()
     assert data["layer_name"] == "city:hospitals"
     assert data["validation_error"] is None
-    assert data["retrieval_mode"] == "semantic"
+    assert data["retrieval_mode"] == "fuzzy"
     assert data["retrieval_top_score"] > 0.5
 
 
@@ -66,10 +66,10 @@ def test_layer_discovery_endpoint_returns_validation_error_when_selection_fails(
         return {
             "selected_layer": "",
             "validation_error": "Low-confidence layer retrieval",
-            "retrieval_mode": "semantic",
+            "retrieval_mode": "fuzzy",
             "retrieval_top_score": 0.1,
             "retrieval_score_gap": 0.0,
-            "retrieval_reason": "semantic-index-unavailable",
+            "retrieval_reason": "low-score",
         }
 
     monkeypatch.setattr("app.api.routes.wfs_discovery_node", fake_wfs_discovery_node)

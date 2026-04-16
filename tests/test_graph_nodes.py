@@ -23,36 +23,6 @@ from app.graph.nodes import (
     wfs_executor_node,
 )
 from app.graph.state import build_initial_state
-from app.tools.vector_store import reset_layer_vector_store
-
-
-@pytest.fixture(autouse=True)
-def _mock_semantic_embeddings(monkeypatch):
-    """Deterministic embeddings keep layer selector tests offline and stable."""
-
-    def _vector_for_text(text: str) -> list[float]:
-        lower = text.lower()
-        if "hospital" in lower or "kranken" in lower:
-            return [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        if "road" in lower or "strass" in lower:
-            return [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        if "state" in lower or "grenz" in lower:
-            return [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        if "school" in lower or "schul" in lower:
-            return [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
-        if "lake" in lower or "see" in lower or "wasser" in lower:
-            return [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
-        if "park" in lower:
-            return [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]
-        return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-
-    async def fake_get_embeddings(texts: list[str], *, http_client=None):
-        return [_vector_for_text(text) for text in texts]
-
-    monkeypatch.setattr("app.graph.nodes.get_embeddings", fake_get_embeddings)
-    reset_layer_vector_store()
-    yield
-    reset_layer_vector_store()
 
 
 def test_build_initial_state_sets_defaults() -> None:
@@ -484,65 +454,6 @@ def test_layer_discoverer_node_selects_layer(monkeypatch) -> None:
     assert updates["validation_error"] is None
 
 
-def test_wfs_discovery_node_refreshes_semantic_index_when_due(monkeypatch) -> None:
-    class _FakeStore:
-        def __init__(self) -> None:
-            self.index_called = False
-
-        def should_reindex(self, *, max_age_hours: int) -> bool:
-            assert max_age_hours == 24
-            return True
-
-        async def index_layers(self, layers, catalog_rows, embed_fn) -> None:
-            self.index_called = True
-
-        def layer_count(self) -> int:
-            return 2
-
-    fake_store = _FakeStore()
-
-    monkeypatch.setattr(
-        "app.graph.nodes.get_settings",
-        lambda: type(
-            "S",
-            (),
-            {
-                "geoserver_wfs_url": "https://wfs",
-                "geoserver_wfs_username": "",
-                "geoserver_wfs_password": "",
-                "layer_catalog_markdown_path": "layer_catalog.md",
-                "layer_catalog_stale_after_hours": 8,
-                "vector_reindex_hours": 24,
-                "layer_discovery_mode": "semantic",
-            },
-        )(),
-    )
-
-    async def fake_discover_layers(*, wfs_url: str, http_client=None, username: str, password: str):
-        return [
-            {"name": "city:hospitals", "title": "Hospitals", "abstract": "Healthcare"},
-            {"name": "city:roads", "title": "Roads", "abstract": "Road network"},
-        ]
-
-    async def fake_ensure_markdown_layer_catalog(*, layers, catalog_path: str, stale_after_hours: int):
-        return "# Catalog", [
-            {"name": "city:hospitals", "de_title": "Krankenhäuser", "en_title": "Hospitals",
-             "de_abstract": "Gesundheit", "en_abstract": "Healthcare", "aliases": []},
-            {"name": "city:roads", "de_title": "Strassen", "en_title": "Roads",
-             "de_abstract": "Strassennetz", "en_abstract": "Road network", "aliases": []},
-        ]
-
-    monkeypatch.setattr("app.graph.nodes.discover_layers", fake_discover_layers)
-    monkeypatch.setattr("app.graph.nodes.ensure_markdown_layer_catalog", fake_ensure_markdown_layer_catalog)
-    monkeypatch.setattr("app.graph.nodes.get_layer_vector_store", lambda: fake_store)
-
-    updates = asyncio.run(wfs_discovery_node({}, config={"configurable": {"wfs_http_client": object()}}))
-
-    assert updates["validation_error"] is None
-    assert len(updates["available_layers"]) == 2
-    assert fake_store.index_called is True
-
-
 def test_layer_discoverer_node_uses_layer_subject_primary_single_match(monkeypatch) -> None:
     class _Layer:
         layer_name = "city:hospitals"
@@ -655,10 +566,10 @@ def test_layer_discoverer_node_returns_low_confidence_when_subject_has_no_match(
     ):
         nonlocal llm_called
         llm_called = True
-        raise AssertionError("LLM should not be called for low-confidence semantic retrieval")
+        raise AssertionError("LLM should not be called for low-confidence retrieval")
 
     monkeypatch.setattr("app.graph.nodes.ainvoke_llm", fake_ainvoke_llm)
-    monkeypatch.setenv("LAYER_DISCOVERY_MODE", "semantic")
+    monkeypatch.setenv("MIN_RETRIEVAL_SCORE", "0.95")
     from app.core.settings import get_settings
     get_settings.cache_clear()
 

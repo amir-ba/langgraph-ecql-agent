@@ -33,8 +33,6 @@ from app.core.http_clients import create_http_client_pool
 from app.core.settings import get_settings
 from app.tools.layer_catalog import ensure_markdown_layer_catalog
 from app.tools.wfs_client import discover_layers
-from app.tools.embedding_client import get_embeddings
-from app.tools.vector_store import get_layer_vector_store
 
 
 @asynccontextmanager
@@ -57,18 +55,6 @@ async def lifespan(app: FastAPI):
             logging.getLogger("app.main").info(
                 "Layer markdown catalog ready with %s layers", len(layers)
             )
-
-            if settings.layer_discovery_mode.strip().lower() == "semantic":
-                store = get_layer_vector_store()
-                await store.index_layers(layers, catalog_rows, get_embeddings)
-                logging.getLogger("app.main").info(
-                    "Vector store indexed with %s layers", store.layer_count()
-                )
-            else:
-                logging.getLogger("app.main").info(
-                    "Layer discovery mode is '%s', skipping vector store indexing",
-                    settings.layer_discovery_mode,
-                )
         except Exception as exc:
             logging.getLogger("app.main").warning(
                 "Layer catalog / vector store initialization failed: %s", exc

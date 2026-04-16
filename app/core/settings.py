@@ -31,14 +31,7 @@ class Settings(BaseSettings):
     llm_prompt_cache_ttl_seconds: int = 3600
     llm_prompt_cache_max_entries: int = 512
 
-    layer_discovery_mode: str = "fuzzy"  # "fuzzy" | "semantic"
-
     embedding_model: str = "jina-embeddings-v2-base-de"
-    embedding_batch_size: int = 8
-    embedding_rpm: int = 20
-    embedding_tpm: int = 30000
-    vector_store_top_k: int = 10
-    vector_reindex_hours: int = 24
 
     min_retrieval_score: float = 0.15
     max_llm_candidates: int = 15

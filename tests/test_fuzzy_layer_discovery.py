@@ -77,7 +77,6 @@ def test_fuzzy_mode_selects_correct_layer(monkeypatch) -> None:
         return _FakeLLMResponse()
 
     monkeypatch.setattr("app.graph.nodes.ainvoke_llm", fake_ainvoke_llm)
-    monkeypatch.setenv("LAYER_DISCOVERY_MODE", "fuzzy")
     # Force settings reload
     from app.core.settings import get_settings
     get_settings.cache_clear()
@@ -94,94 +93,6 @@ def test_fuzzy_mode_selects_correct_layer(monkeypatch) -> None:
     assert result["selected_layer"] == "city:hospitals"
     assert result["validation_error"] is None
     assert result["retrieval_mode"] == "fuzzy"
-
-
-def test_fuzzy_mode_makes_no_embedding_calls(monkeypatch) -> None:
-    """In fuzzy mode, no embedding or vector store calls should be made."""
-
-    embedding_called = False
-
-    async def spy_get_embeddings(texts, **kwargs):
-        nonlocal embedding_called
-        embedding_called = True
-        raise AssertionError("Embeddings should not be called in fuzzy mode")
-
-    class _FakeLLMResponse:
-        layer_name = "city:schools"
-        confidence = "high"
-        reasoning = "Schools match"
-        score = 0.85
-
-    async def fake_ainvoke_llm(
-        *,
-        messages,
-        response_format,
-        agent_state=None,
-        model_name=None,
-        enable_prompt_cache=None,
-        node_name=None,
-    ):
-        return _FakeLLMResponse()
-
-    monkeypatch.setattr("app.graph.nodes.ainvoke_llm", fake_ainvoke_llm)
-    monkeypatch.setattr("app.graph.nodes.get_embeddings", spy_get_embeddings)
-    monkeypatch.setenv("LAYER_DISCOVERY_MODE", "fuzzy")
-    from app.core.settings import get_settings
-    get_settings.cache_clear()
-
-    state: dict[str, Any] = {
-        "user_query": "where are the schools",
-        "layer_subject": "schools",
-        "available_layers": LAYERS,
-        "layer_catalog_rows": CATALOG_ROWS,
-    }
-
-    result = asyncio.run(layer_discoverer_node(state))
-
-    assert not embedding_called
-    assert result["selected_layer"] == "city:schools"
-    assert result["retrieval_mode"] == "fuzzy"
-
-
-def test_wfs_discovery_skips_indexing_in_fuzzy_mode(monkeypatch) -> None:
-    """In fuzzy mode, wfs_discovery_node should NOT attempt vector store indexing."""
-
-    index_called = False
-
-    async def fake_discover_layers(*, wfs_url, http_client=None, username, password):
-        return [_make_layer("city:hospitals", "Hospitals", "Healthcare")]
-
-    async def fake_ensure_catalog(*, layers, catalog_path, stale_after_hours):
-        return "# catalog", [{"name": "city:hospitals", "de_title": "Hospitals"}]
-
-    original_index = None
-
-    class _SpyStore:
-        def should_reindex(self, *, max_age_hours):
-            return True
-
-        async def index_layers(self, layers, catalog_rows, embed_fn):
-            nonlocal index_called
-            index_called = True
-
-        def is_indexed(self):
-            return False
-
-        def layer_count(self):
-            return 0
-
-    monkeypatch.setattr("app.graph.nodes.discover_layers", fake_discover_layers)
-    monkeypatch.setattr("app.graph.nodes.ensure_markdown_layer_catalog", fake_ensure_catalog)
-    monkeypatch.setattr("app.graph.nodes.get_layer_vector_store", lambda: _SpyStore())
-    monkeypatch.setenv("LAYER_DISCOVERY_MODE", "fuzzy")
-    from app.core.settings import get_settings
-    get_settings.cache_clear()
-
-    state: dict[str, Any] = {"user_query": "hospitals"}
-    result = asyncio.run(wfs_discovery_node(state))
-
-    assert not index_called
-    assert result["available_layers"] == [_make_layer("city:hospitals", "Hospitals", "Healthcare")]
 
 
 def test_fuzzy_mode_scores_catalog_translations_and_aliases(monkeypatch) -> None:
@@ -214,7 +125,6 @@ def test_fuzzy_mode_scores_catalog_translations_and_aliases(monkeypatch) -> None
         return _FakeLLMResponse()
 
     monkeypatch.setattr("app.graph.nodes.ainvoke_llm", fake_ainvoke_llm)
-    monkeypatch.setenv("LAYER_DISCOVERY_MODE", "fuzzy")
     monkeypatch.setenv("MAX_LLM_CANDIDATES", "1")
     from app.core.settings import get_settings
     get_settings.cache_clear()
@@ -265,13 +175,3 @@ def test_fuzzy_mode_scores_catalog_translations_and_aliases(monkeypatch) -> None
     assert result["selected_layer"] == "city:fca_gesundheit"
     # The LLM must have received fca_gesundheit as top candidate
     assert "city:fca_gesundheit" in llm_received_layers[0]
-
-
-def test_setting_defaults_to_fuzzy() -> None:
-    """The layer_discovery_mode setting should default to 'fuzzy'."""
-    from app.core.settings import Settings
-    s = Settings(
-        llm_base_url="http://x",
-        llm_api_key="k",
-    )
-    assert s.layer_discovery_mode == "fuzzy"
