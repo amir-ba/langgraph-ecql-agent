@@ -49,7 +49,7 @@ async def lifespan(app: FastAPI):
                 username=settings.geoserver_wfs_username,
                 password=settings.geoserver_wfs_password,
             )
-            catalog_markdown, catalog_rows = await ensure_markdown_layer_catalog(
+            _, catalog_rows = await ensure_markdown_layer_catalog(
                 layers=layers,
                 catalog_path=settings.layer_catalog_markdown_path,
                 stale_after_hours=settings.layer_catalog_stale_after_hours,
@@ -58,11 +58,17 @@ async def lifespan(app: FastAPI):
                 "Layer markdown catalog ready with %s layers", len(layers)
             )
 
-            store = get_layer_vector_store()
-            await store.index_layers(layers, catalog_rows, get_embeddings)
-            logging.getLogger("app.main").info(
-                "Vector store indexed with %s layers", store.layer_count()
-            )
+            if settings.layer_discovery_mode.strip().lower() == "semantic":
+                store = get_layer_vector_store()
+                await store.index_layers(layers, catalog_rows, get_embeddings)
+                logging.getLogger("app.main").info(
+                    "Vector store indexed with %s layers", store.layer_count()
+                )
+            else:
+                logging.getLogger("app.main").info(
+                    "Layer discovery mode is '%s', skipping vector store indexing",
+                    settings.layer_discovery_mode,
+                )
         except Exception as exc:
             logging.getLogger("app.main").warning(
                 "Layer catalog / vector store initialization failed: %s", exc

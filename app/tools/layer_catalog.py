@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
+import logging
 from pathlib import Path
 import re
 from typing import Any
@@ -9,6 +11,51 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.core.llm import ainvoke_llm
+
+logger = logging.getLogger(__name__)
+
+_TRANSLATION_BATCH_SIZE = 20
+_TRANSLATION_MAX_CONCURRENCY = 3
+
+
+LAYER_NAMING_CONVENTION = """\
+Naming conventions for GeoServer feature classes:
+- fc*  = feature class (prefix for all feature classes)
+  - fca_* = feature class area (polygon), e.g. fca_admin_units
+  - fcl_* = feature class line, e.g. fcl_fahrbahnbegrenzungslinie
+  - fcp_* = feature class point, e.g. fcp_grenzpunkt
+- fv*  = feature view (database view with geographic features)
+  - fva_* = feature view area (polygon), e.g. fva_kvz_nahbereich
+  - fvl_* = feature view line, e.g. fvl_trenches
+  - fvp_* = feature view point, e.g. fvp_pictures_label
+- mfv* = materialized feature view
+  - mfva_* = materialized view area (polygon)
+  - mfcl_* = materialized view line
+  - mfcp_* = materialized view point
+"""
+
+_PREFIX_TO_GEOMETRY_TYPE: dict[str, str] = {
+    "mfva_": "polygon",
+    "mfcl_": "line",
+    "mfcp_": "point",
+    "fva_": "polygon",
+    "fvl_": "line",
+    "fvp_": "point",
+    "fca_": "polygon",
+    "fcl_": "line",
+    "fcp_": "point",
+}
+
+
+def parse_geometry_type_from_name(layer_name: str) -> str | None:
+    """Derive geometry type (polygon/line/point) from the layer name prefix convention."""
+    # Strip optional workspace prefix (e.g. "city:fca_admin_units" -> "fca_admin_units")
+    bare = layer_name.split(":")[-1] if ":" in layer_name else layer_name
+    bare_lower = bare.lower()
+    for prefix, geom_type in _PREFIX_TO_GEOMETRY_TYPE.items():
+        if bare_lower.startswith(prefix):
+            return geom_type
+    return None
 
 
 LayerTranslator = Callable[[list[dict[str, str]]], Awaitable[list[dict[str, str | list[str]]]]]
@@ -59,40 +106,41 @@ def _fallback_translation_rows(layers: list[dict[str, str]]) -> list[dict[str, s
     return rows
 
 
-async def translate_layers_with_llm(layers: list[dict[str, str]]) -> list[dict[str, str | list[str]]]:
-    if not layers:
-        return []
+_TRANSLATION_SYSTEM_PROMPT = (
+    "You enrich GeoServer layer metadata. For each input layer, return bilingual metadata with "
+    "German and English text and useful aliases. Keep layer names unchanged. Return JSON only.\n\n"
+    "IMPORTANT: German (de_title/de_abstract) and English (en_title/en_title) MUST differ. "
+    "If the source text is German, provide a proper English translation. "
+    "If the source text is English, provide a proper German translation.\n\n"
+    "Example:\n"
+    '  Input: {"name": "city:schulen", "title": "Schulen", "abstract": "Alle Schulen im Stadtgebiet"}\n'
+    '  Output: {"name": "city:schulen", "de_title": "Schulen", "en_title": "Schools", '
+    '"de_abstract": "Alle Schulen im Stadtgebiet", "en_abstract": "All schools in the city area", '
+    '"aliases": ["schulen", "schools"]}\n\n'
+    "Example:\n"
+    '  Input: {"name": "city:hospitals", "title": "Hospitals", "abstract": "Healthcare facilities"}\n'
+    '  Output: {"name": "city:hospitals", "de_title": "Krankenhäuser", "en_title": "Hospitals", '
+    '"de_abstract": "Gesundheitseinrichtungen", "en_abstract": "Healthcare facilities", '
+    '"aliases": ["krankenhäuser", "hospitals"]}'
+)
 
+
+async def _translate_batch(
+    batch_layers: list[dict[str, str]],
+    semaphore: asyncio.Semaphore,
+) -> list[dict[str, str | list[str]]]:
+    """Translate a single batch of layers behind a concurrency semaphore."""
     rows = [
         {
             "name": _normalize_text(str(layer.get("name", ""))),
             "title": _normalize_text(str(layer.get("title", ""))),
             "abstract": _normalize_text(str(layer.get("abstract", ""))),
         }
-        for layer in layers
+        for layer in batch_layers
     ]
 
     messages = [
-        {
-            "role": "system",
-            "content": (
-                "You enrich GeoServer layer metadata. For each input layer, return bilingual metadata with "
-                "German and English text and useful aliases. Keep layer names unchanged. Return JSON only.\n\n"
-                "IMPORTANT: German (de_title/de_abstract) and English (en_title/en_abstract) MUST differ. "
-                "If the source text is German, provide a proper English translation. "
-                "If the source text is English, provide a proper German translation.\n\n"
-                "Example:\n"
-                "  Input: {\"name\": \"city:schulen\", \"title\": \"Schulen\", \"abstract\": \"Alle Schulen im Stadtgebiet\"}\n"
-                "  Output: {\"name\": \"city:schulen\", \"de_title\": \"Schulen\", \"en_title\": \"Schools\", "
-                "\"de_abstract\": \"Alle Schulen im Stadtgebiet\", \"en_abstract\": \"All schools in the city area\", "
-                "\"aliases\": [\"schulen\", \"schools\"]}\n\n"
-                "Example:\n"
-                "  Input: {\"name\": \"city:hospitals\", \"title\": \"Hospitals\", \"abstract\": \"Healthcare facilities\"}\n"
-                "  Output: {\"name\": \"city:hospitals\", \"de_title\": \"Krankenhäuser\", \"en_title\": \"Hospitals\", "
-                "\"de_abstract\": \"Gesundheitseinrichtungen\", \"en_abstract\": \"Healthcare facilities\", "
-                "\"aliases\": [\"krankenhäuser\", \"hospitals\"]}"
-            ),
-        },
+        {"role": "system", "content": _TRANSLATION_SYSTEM_PROMPT},
         {
             "role": "user",
             "content": (
@@ -103,65 +151,92 @@ async def translate_layers_with_llm(layers: list[dict[str, str]]) -> list[dict[s
         },
     ]
 
-    fallback_rows = _fallback_translation_rows(layers)
+    fallback_rows = _fallback_translation_rows(batch_layers)
 
     try:
-        result = await ainvoke_llm(messages=messages, output_schema=LayerTranslationBatch)
+        async with semaphore:
+            result = await ainvoke_llm(messages=messages, output_schema=LayerTranslationBatch)
         merged_rows = _merge_translation_results(result, fallback_rows)
-
         if merged_rows:
-            # Identify rows where translation did not occur and attempt a repair pass
-            untranslated_indices = [
-                i for i, row in enumerate(merged_rows) if not _has_translation_occurred(row)
-            ]
-
-            if untranslated_indices:
-                repair_input = [merged_rows[i] for i in untranslated_indices]
-                repair_messages = [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a translation repair assistant. The following layer rows have identical "
-                            "German and English fields. Translate each en_title from German to English → en_title, "
-                            "and each en_abstract from German to English → en_abstract. "
-                            "If a field is already English, translate it to German for the de_ field. "
-                            "Return only the corrected rows. Return JSON only."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            "Fix translations for these layers. "
-                            "Output fields per layer: name, de_title, en_title, de_abstract, en_abstract, aliases.\n"
-                            f"Input layers:\n{repair_input}"
-                        ),
-                    },
-                ]
-                try:
-                    repair_result = await ainvoke_llm(messages=repair_messages, output_schema=LayerTranslationBatch)
-                    repair_parsed = _parse_translation_batch(repair_result)
-                    repair_by_name = {
-                        _normalize_text(str(item.get("name", ""))): item
-                        for item in repair_parsed
-                        if _normalize_text(str(item.get("name", "")))
-                    }
-                    for idx, orig_idx in enumerate(untranslated_indices):
-                        row_name = _normalize_text(str(merged_rows[orig_idx].get("name", "")))
-                        repaired = repair_by_name.get(row_name)
-                        if repaired and _has_translation_occurred(repaired):
-                            merged_rows[orig_idx] = repaired
-                except Exception:
-                    pass  # Repair pass is best-effort
-
-            # Mark all rows with translation_verified
             for row in merged_rows:
                 row["translation_verified"] = _has_translation_occurred(row)
-
             return merged_rows
     except Exception:
-        pass
+        logger.warning("Translation batch failed for %d layers, using fallback", len(batch_layers))
 
     return fallback_rows
+
+
+async def translate_layers_with_llm(layers: list[dict[str, str]]) -> list[dict[str, str | list[str]]]:
+    if not layers:
+        return []
+
+    # Split into small batches for manageable LLM calls
+    batches = [
+        layers[i : i + _TRANSLATION_BATCH_SIZE]
+        for i in range(0, len(layers), _TRANSLATION_BATCH_SIZE)
+    ]
+    logger.info(
+        "Translating %d layers in %d batches (batch_size=%d, concurrency=%d)",
+        len(layers), len(batches), _TRANSLATION_BATCH_SIZE, _TRANSLATION_MAX_CONCURRENCY,
+    )
+
+    semaphore = asyncio.Semaphore(_TRANSLATION_MAX_CONCURRENCY)
+    batch_results = await asyncio.gather(
+        *(_translate_batch(batch, semaphore) for batch in batches)
+    )
+
+    # Flatten batch results
+    all_rows: list[dict[str, str | list[str]]] = []
+    for result in batch_results:
+        all_rows.extend(result)
+
+    # Repair pass for untranslated rows (single batch, best-effort)
+    untranslated_indices = [
+        i for i, row in enumerate(all_rows) if not _has_translation_occurred(row)
+    ]
+    if untranslated_indices and len(untranslated_indices) <= _TRANSLATION_BATCH_SIZE:
+        repair_input = [all_rows[i] for i in untranslated_indices]
+        repair_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a translation repair assistant. The following layer rows have identical "
+                    "German and English fields. Translate each en_title from German to English → en_title, "
+                    "and each en_abstract from German to English → en_abstract. "
+                    "If a field is already English, translate it to German for the de_ field. "
+                    "Return only the corrected rows. Return JSON only."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Fix translations for these layers. "
+                    "Output fields per layer: name, de_title, en_title, de_abstract, en_abstract, aliases.\n"
+                    f"Input layers:\n{repair_input}"
+                ),
+            },
+        ]
+        try:
+            repair_result = await ainvoke_llm(messages=repair_messages, output_schema=LayerTranslationBatch)
+            repair_parsed = _parse_translation_batch(repair_result)
+            repair_by_name = {
+                _normalize_text(str(item.get("name", ""))): item
+                for item in repair_parsed
+                if _normalize_text(str(item.get("name", "")))
+            }
+            for orig_idx in untranslated_indices:
+                row_name = _normalize_text(str(all_rows[orig_idx].get("name", "")))
+                repaired = repair_by_name.get(row_name)
+                if repaired and _has_translation_occurred(repaired):
+                    all_rows[orig_idx] = repaired
+        except Exception:
+            pass  # Repair pass is best-effort
+
+    for row in all_rows:
+        row["translation_verified"] = _has_translation_occurred(row)
+
+    return all_rows
 
 
 def _parse_translation_batch(result: LayerTranslationBatch) -> list[dict[str, str | list[str]]]:

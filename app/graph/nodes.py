@@ -27,6 +27,7 @@ from app.tools.wfs_client import (
     get_layer_schema,
 )
 from app.tools.layer_catalog import (
+    LAYER_NAMING_CONVENTION,
     ensure_markdown_layer_catalog,
     render_basic_markdown_catalog,
     render_catalog_rows_as_markdown,
@@ -53,7 +54,11 @@ def _normalize_query_text(text: str) -> str:
     return " ".join(tokens)
 
 
-def _score_layer_against_query(layer: dict[str, str], query_text: str) -> float:
+def _score_layer_against_query(
+    layer: dict[str, str],
+    query_text: str,
+    catalog_row: dict[str, Any] | None = None,
+) -> float:
     normalized_query = _normalize_query_text(query_text)
     if not normalized_query:
         return 0.0
@@ -63,6 +68,15 @@ def _score_layer_against_query(layer: dict[str, str], query_text: str) -> float:
         str(layer.get("name", "")),
         str(layer.get("abstract", "")),
     ]
+
+    if catalog_row:
+        for key in ("de_title", "en_title", "de_abstract", "en_abstract"):
+            val = str(catalog_row.get(key, ""))
+            if val:
+                fields_to_match.append(val)
+        for alias in catalog_row.get("aliases") or []:
+            if alias:
+                fields_to_match.append(str(alias))
 
     best = 0.0
     for field_value in fields_to_match:
@@ -196,7 +210,19 @@ async def unified_router_analyzer_node(state: AgentState, config: RunnableConfig
                 "target features (layer subject), id-bound spatial_targets, "
                 "id-bound spatial_predicates, explicit WKT geometries "
                 "(POINT/LINESTRING/POLYGON), and attributes. "
-                "Current location is Germany. Current year is 2026."
+                "Current year is 2026.\n\n"
+                "CRITICAL rules for spatial_targets:\n"
+                "- spatial_reference 'value' MUST be a short, geocodable place name "
+                "exactly as the user typed it (e.g. 'Hamburg', 'Heidelberg'). "
+                "Do NOT add country names, descriptions, or parenthetical text. "
+                "Do NOT embellish or translate the location name.\n"
+                "- The layer_subject (the feature type being queried, e.g. "
+                "'neubaugebiete', 'planarea', 'roads') must NEVER appear as a "
+                "spatial_reference target. It belongs only in layer_subject.\n"
+                "- Only create spatial_reference targets for actual geocodable "
+                "locations (cities, addresses, streets, POIs).\n"
+                "- For a query like 'find X within 5km of Y', X is the layer_subject "
+                "and Y is the only spatial_reference target."
             ),
         },
         {
@@ -287,24 +313,37 @@ async def geocoder_context_node(state: AgentState, config: RunnableConfig | None
                 unresolved_target_ids.append(target_id)
             continue
 
-        # A spatial_reference whose value matches the layer subject is the layer being
-        # queried itself — not a geocodable location. Skip it silently so it never
-        # becomes an unresolved required target.
-        if target_kind == "spatial_reference" and layer_subject and target_value.lower() == layer_subject:
-            logger.debug(
-                "[geocoder_context_node] skipping self-referential target %s (value=%r matches layer_subject)",
-                target_id,
-                target_value,
-            )
-            continue
+        # A spatial_reference whose value matches (or contains) the layer subject
+        # is the layer being queried itself — not a geocodable location. Skip it
+        # silently so it never becomes an unresolved required target.
+        if target_kind == "spatial_reference" and layer_subject:
+            value_lower = target_value.lower()
+            if value_lower == layer_subject or layer_subject in value_lower:
+                logger.debug(
+                    "[geocoder_context_node] skipping self-referential target %s (value=%r contains layer_subject=%r)",
+                    target_id,
+                    target_value,
+                    layer_subject,
+                )
+                continue
 
         distance_filter = _distance_filter_for_target(target_id, spatial_predicates)
+
+        # Clean up spatial_reference values before geocoding: strip
+        # parenthetical descriptions and trailing ", Country" suffixes that
+        # confuse the suggest endpoint.
+        geocode_value = target_value
+        if target_kind == "spatial_reference":
+            geocode_value = _re.sub(r"\s*\([^)]*\)", "", geocode_value).strip()
+            geocode_value = _re.sub(r",\s*(Germany|Deutschland|Austria|Österreich|Switzerland|Schweiz)$", "", geocode_value, flags=_re.IGNORECASE).strip()
+            if not geocode_value:
+                geocode_value = target_value
 
         context: dict[str, Any] | None = None
         if target_kind == "explicit_geometry":
             context = _build_explicit_geometry_context(target_id, target_value, distance_filter)
         elif target_kind == "spatial_reference":
-            context = await _resolve_reference_context(target_id, target_value, distance_filter, geocoder)
+            context = await _resolve_reference_context(target_id, geocode_value, distance_filter, geocoder)
 
         if context is None:
             if required:
@@ -551,43 +590,62 @@ async def wfs_discovery_node(state: AgentState, config: RunnableConfig | None = 
 
     # Keep semantic index fresh in runtime (default every 24h), and recover from
     # startup indexing failures by opportunistically indexing here.
-    try:
-        store = get_layer_vector_store()
-        reindex_hours = getattr(settings, "vector_reindex_hours", 24)
-        if store.should_reindex(max_age_hours=reindex_hours):
-            await store.index_layers(
-                cast(list[dict[str, str]], layers),
-                cast(list[dict[str, Any]], catalog_rows),
-                lambda texts: get_embeddings(texts, http_client=wfs_http_client),
-            )
-            logger.info("[wfs_discovery_node] semantic index refreshed; layer_count=%s", store.layer_count())
-    except Exception as exc:
-        logger.warning("[wfs_discovery_node] semantic index refresh failed: %s", exc)
+    # Skip when using fuzzy discovery mode — no embeddings needed.
+    discovery_mode = getattr(settings, "layer_discovery_mode", "fuzzy").strip().lower()
+    if discovery_mode == "semantic":
+        try:
+            store = get_layer_vector_store()
+            reindex_hours = getattr(settings, "vector_reindex_hours", 24)
+            if store.should_reindex(max_age_hours=reindex_hours):
+                await store.index_layers(
+                    cast(list[dict[str, str]], layers),
+                    cast(list[dict[str, Any]], catalog_rows),
+                    lambda texts: get_embeddings(texts, http_client=wfs_http_client),
+                )
+                logger.info("[wfs_discovery_node] semantic index refreshed; layer_count=%s", store.layer_count())
+        except Exception as exc:
+            logger.warning("[wfs_discovery_node] semantic index refresh failed: %s", exc)
 
     logger.debug("[wfs_discovery_node] output=%s", _as_json(output))
     return output
 
 
-async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None = None) -> dict[str, Any]:
-    available_layers = state.get("available_layers", [])
-    layer_subject = state.get("layer_subject")
-    settings = get_settings()
-    logger.debug(
-        "[layer_discoverer_node] input user_query=%s layer_subject=%s available_layers_count=%s",
-        state.get("user_query", ""),
-        layer_subject,
-        len(available_layers) if isinstance(available_layers, list) else 0,
-    )
-    if not available_layers:
-        output = {
-            "selected_layer": "",
-            "validation_error": "No WFS layers available for selection",
-        }
-        logger.debug("[layer_discoverer_node] output=%s", _as_json(output))
-        return output
+async def _rank_layers_fuzzy(
+    query_text: str,
+    available_layers: list[dict[str, str]],
+    max_candidates: int,
+    catalog_rows: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, str]], float, float, str]:
+    """Rank layers by fuzzy string similarity. Returns (top_layers, top_score, score_gap, reason)."""
+    row_by_name: dict[str, dict[str, Any]] = {
+        str(r.get("name", "")): r for r in (catalog_rows or [])
+    }
+    scored = [
+        (layer, _score_layer_against_query(layer, query_text, row_by_name.get(str(layer.get("name", "")))))
+        for layer in available_layers
+    ]
+    scored.sort(key=lambda pair: pair[1], reverse=True)
+    top_scored = scored[:max_candidates]
 
-    # --- Pre-rank layers using semantic vector search ---
-    query_text = layer_subject or state.get("user_query", "")
+    top_layers = [layer for layer, _ in top_scored]
+    top_score = top_scored[0][1] if top_scored else 0.0
+    score_gap = (top_scored[0][1] - top_scored[1][1]) if len(top_scored) > 1 else top_score
+    reason = (
+        f"top={top_scored[0][0].get('name', '')} score={top_score:.3f} gap={score_gap:.3f}"
+        if top_scored
+        else ""
+    )
+    return top_layers, top_score, score_gap, reason
+
+
+async def _rank_layers_semantic(
+    query_text: str,
+    available_layers: list[dict[str, str]],
+    state: AgentState,
+    settings: Any,
+    config: RunnableConfig | None,
+) -> tuple[list[dict[str, str]], float, float, str] | dict[str, Any]:
+    """Rank layers by semantic embedding search. Returns (top_layers, top_score, score_gap, reason) or an error dict."""
     configurable = (config or {}).get("configurable") or {}
     wfs_http_client = cast(httpx.AsyncClient | None, configurable.get("wfs_http_client"))
     store = get_layer_vector_store()
@@ -606,7 +664,7 @@ async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None
             logger.warning("[layer_discoverer_node] semantic index unavailable: %s", exc)
 
     if not store.is_indexed():
-        output = {
+        return {
             "selected_layer": "",
             "validation_error": (
                 "Semantic layer index unavailable: unable to confidently map "
@@ -624,30 +682,65 @@ async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None
             "retrieval_reason": "semantic-index-unavailable",
             "candidate_layers_for_llm_count": 0,
         }
-        logger.debug("[layer_discoverer_node] output=%s", _as_json(output))
-        return output
 
     query_embedding = await get_embeddings([query_text], http_client=wfs_http_client)
     vector_top_k = getattr(settings, "vector_store_top_k", 8)
     max_candidates = getattr(settings, "max_llm_candidates", 10)
     semantic_results = store.search(query_embedding[0], top_k=vector_top_k)[:max_candidates]
 
-    retrieval_top_score = semantic_results[0]["score"] if semantic_results else 0.0
-    retrieval_score_gap = (
+    top_score = semantic_results[0]["score"] if semantic_results else 0.0
+    score_gap = (
         (semantic_results[0]["score"] - semantic_results[1]["score"])
         if len(semantic_results) > 1
-        else retrieval_top_score
+        else top_score
     )
-    retrieval_reason = (
-        f"top={semantic_results[0]['layer_name']} score={retrieval_top_score:.3f} gap={retrieval_score_gap:.3f}"
+    reason = (
+        f"top={semantic_results[0]['layer_name']} score={top_score:.3f} gap={score_gap:.3f}"
         if semantic_results
         else ""
     )
 
-    # Map semantic results back to full layer dicts
     layer_by_name = {str(l.get("name", "")): l for l in available_layers}
     scored_layer_names = [r["layer_name"] for r in semantic_results]
     top_layers = [layer_by_name[name] for name in scored_layer_names if name in layer_by_name]
+    return top_layers, top_score, score_gap, reason
+
+
+async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None = None) -> dict[str, Any]:
+    available_layers = state.get("available_layers", [])
+    layer_subject = state.get("layer_subject")
+    settings = get_settings()
+    discovery_mode = getattr(settings, "layer_discovery_mode", "fuzzy").strip().lower()
+    logger.debug(
+        "[layer_discoverer_node] input user_query=%s layer_subject=%s available_layers_count=%s mode=%s",
+        state.get("user_query", ""),
+        layer_subject,
+        len(available_layers) if isinstance(available_layers, list) else 0,
+        discovery_mode,
+    )
+    if not available_layers:
+        output = {
+            "selected_layer": "",
+            "validation_error": "No WFS layers available for selection",
+        }
+        logger.debug("[layer_discoverer_node] output=%s", _as_json(output))
+        return output
+
+    query_text = layer_subject or state.get("user_query", "")
+    max_candidates = getattr(settings, "max_llm_candidates", 10)
+
+    if discovery_mode == "semantic":
+        rank_result = await _rank_layers_semantic(query_text, available_layers, state, settings, config)
+        if isinstance(rank_result, dict):
+            # Error dict from semantic ranking
+            logger.debug("[layer_discoverer_node] output=%s", _as_json(rank_result))
+            return rank_result
+        top_layers, retrieval_top_score, retrieval_score_gap, retrieval_reason = rank_result
+    else:
+        top_layers, retrieval_top_score, retrieval_score_gap, retrieval_reason = await _rank_layers_fuzzy(
+            query_text, available_layers, max_candidates,
+            catalog_rows=state.get("layer_catalog_rows") or [],
+        )
 
     # --- Early-exit gate: if best score is below threshold, skip LLM ---
     min_score = getattr(settings, "min_retrieval_score", 0.15)
@@ -664,7 +757,7 @@ async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None
                     "Please mention a clearer feature type (for example, hospitals, roads, or schools)."
                 )
             ),
-            "retrieval_mode": "semantic",
+            "retrieval_mode": discovery_mode,
             "retrieval_top_score": retrieval_top_score,
             "retrieval_score_gap": retrieval_score_gap,
             "retrieval_reason": retrieval_reason,
@@ -689,7 +782,8 @@ async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None
                 "Choose exactly one layer_name from the markdown catalog. "
                 "Do not invent layer names. "
                 "Set confidence to low if no catalog entry clearly matches the request. "
-                "Provide a short reasoning for your selection and a score from 0 to 1."
+                "Provide a short reasoning for your selection and a score from 0 to 1.\n\n"
+                f"{LAYER_NAMING_CONVENTION}"
             ),
         },
         {
@@ -703,12 +797,14 @@ async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None
         },
     ]
 
+    layer_selector_model = get_settings().layer_selector_model.strip() or None
     result = cast(
         LayerSelection,
         await ainvoke_llm(
             messages=messages,
             response_format=LayerSelection,
             agent_state=state,
+            model_name=layer_selector_model,
             enable_prompt_cache=True,
             node_name="layer_discoverer_node",
         ),
@@ -735,7 +831,7 @@ async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None
                     "Please mention a clearer feature type (for example, hospitals, roads, or schools)."
                 )
             ),
-            "retrieval_mode": "semantic",
+            "retrieval_mode": discovery_mode,
             "retrieval_top_score": retrieval_top_score,
             "retrieval_score_gap": retrieval_score_gap,
             "retrieval_reason": retrieval_reason,
@@ -747,7 +843,7 @@ async def layer_discoverer_node(state: AgentState, config: RunnableConfig | None
     output = {
         "selected_layer": chosen_layer,
         "validation_error": None,
-        "retrieval_mode": "semantic",
+        "retrieval_mode": discovery_mode,
         "retrieval_top_score": retrieval_top_score,
         "retrieval_score_gap": retrieval_score_gap,
         "retrieval_reason": retrieval_reason,

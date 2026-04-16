@@ -513,6 +513,7 @@ def test_wfs_discovery_node_refreshes_semantic_index_when_due(monkeypatch) -> No
                 "layer_catalog_markdown_path": "layer_catalog.md",
                 "layer_catalog_stale_after_hours": 8,
                 "vector_reindex_hours": 24,
+                "layer_discovery_mode": "semantic",
             },
         )(),
     )
@@ -657,6 +658,9 @@ def test_layer_discoverer_node_returns_low_confidence_when_subject_has_no_match(
         raise AssertionError("LLM should not be called for low-confidence semantic retrieval")
 
     monkeypatch.setattr("app.graph.nodes.ainvoke_llm", fake_ainvoke_llm)
+    monkeypatch.setenv("LAYER_DISCOVERY_MODE", "semantic")
+    from app.core.settings import get_settings
+    get_settings.cache_clear()
 
     updates = asyncio.run(layer_discoverer_node(
         {
@@ -691,6 +695,7 @@ def test_layer_discoverer_node_gracefully_falls_back_on_low_confidence(monkeypat
         messages,
         response_format,
         agent_state=None,
+        model_name=None,
         enable_prompt_cache=None,
         node_name=None,
     ):
@@ -1149,6 +1154,7 @@ def test_layer_discoverer_node_returns_fallback_without_llm_when_scores_too_low(
             "min_retrieval_score": 0.5,
             "max_llm_candidates": 10,
             "current_model": "gpt-4.1",
+            "layer_selector_model": "",
         })(),
     )
 
@@ -1194,6 +1200,7 @@ def test_layer_discoverer_node_populates_scores_on_success(monkeypatch) -> None:
             "min_retrieval_score": 0.15,
             "max_llm_candidates": 10,
             "current_model": "gpt-4.1",
+            "layer_selector_model": "",
         })(),
     )
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -7,6 +8,8 @@ from typing import Any
 import httpx
 
 from app.core.settings import Settings, get_settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -81,10 +84,12 @@ class GeocoderClient:
         return await self._get("/geocoder/v1/forward", params=params)
 
     async def forward_fulltext(self, query: str, max_results: int = 5, epsg: int = 4326) -> dict[str, Any]:
-        return await self._get(
+        response = await self._get(
             "/geocoder/v1/forward/fulltext",
             params={"query": query, "maxResults": max_results, "epsg": epsg},
         )
+        logger.debug(f"forward_fulltext response: {response}")
+        return response
 
     async def reverse(self, coord: str, epsg: int | None = None, max_dist: float = 0.05) -> dict[str, Any]:
         params: dict[str, Any] = {"coord": coord, "maxDist": max_dist}

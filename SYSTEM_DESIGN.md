@@ -221,7 +221,7 @@ Key environment-driven settings:
 - min_retrieval_score: semantic/fuzzy matching threshold below which LLM selection is skipped (default 0.15)
 - max_llm_candidates: maximum number of pre-ranked layers sent to the LLM selector (default 10)
 - embedding_model: embedding model for semantic search (default jina-embeddings-v2-base-de)
-- vector_store_top_k: number of results returned from vector search (default 8)
+- vector_store_top_k: number of results returned from vector search (default 10)
 - vector_reindex_hours: runtime semantic index refresh interval (default 24)
 - geocoder OAuth and API URLs
 

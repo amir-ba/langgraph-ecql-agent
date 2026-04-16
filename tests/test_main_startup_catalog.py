@@ -127,6 +127,7 @@ def test_lifespan_indexes_vector_store_on_startup(monkeypatch, tmp_path: Path) -
                 "geoserver_wfs_password": "",
                 "layer_catalog_markdown_path": str(tmp_path / "layer_catalog.md"),
                 "layer_catalog_stale_after_hours": 8,
+                "layer_discovery_mode": "semantic",
             },
         )(),
     )

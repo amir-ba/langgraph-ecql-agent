@@ -21,7 +21,14 @@ class SpatialTargetDef(BaseModel):
     kind: Literal["explicit_geometry", "spatial_reference"] = Field(
         description="Whether the target is explicit WKT geometry or textual spatial reference."
     )
-    value: str = Field(description="WKT value for explicit geometry or location text for references.")
+    value: str = Field(
+        description=(
+            "For explicit_geometry: WKT string. "
+            "For spatial_reference: the short, geocodable place name exactly as "
+            "the user wrote it (e.g. 'Hamburg', not 'Hamburg, Germany'). "
+            "Never include descriptions, translations, or country suffixes."
+        )
+    )
     role: Literal["primary_area", "secondary_area", "proximity_anchor", "unspecified"] = Field(
         default="unspecified",
         description="Optional semantic role of this target in the user request.",

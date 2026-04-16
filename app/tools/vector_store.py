@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+import hashlib
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import chromadb
+
+from app.tools.layer_catalog import parse_geometry_type_from_name
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +17,7 @@ EmbedFn = Callable[[list[str]], Awaitable[list[list[float]]]]
 
 
 def _build_document(layer: dict[str, str], catalog_row: dict[str, Any] | None) -> str:
+    """Build embedding document from layer metadata and optional catalog row."""
     name = layer.get("name", "")
     if catalog_row:
         parts = [
@@ -32,7 +36,15 @@ def _build_document(layer: dict[str, str], catalog_row: dict[str, Any] | None) -
             f"Title: {layer.get('title', '')}",
             f"Abstract: {layer.get('abstract', '')}",
         ]
+    geom_type = parse_geometry_type_from_name(name)
+    if geom_type:
+        parts.append(f"Geometry type: {geom_type}")
     return " | ".join(parts)
+
+
+def _compute_content_hash(documents: list[str]) -> str:
+    content = "\n".join(sorted(documents))
+    return hashlib.sha256(content.encode()).hexdigest()
 
 
 class LayerVectorStore:
@@ -45,6 +57,7 @@ class LayerVectorStore:
         self._collection: chromadb.Collection | None = None
         self._indexed = False
         self._last_indexed_at: datetime | None = None
+        self._last_content_hash: str | None = None
         self._index_lock = asyncio.Lock()
 
     async def index_layers(
@@ -54,16 +67,6 @@ class LayerVectorStore:
         embed_fn: EmbedFn,
     ) -> None:
         async with self._index_lock:
-            # Always start fresh: delete then create
-            try:
-                self._client.delete_collection(self._collection_name)
-            except Exception:
-                pass
-            self._collection = self._client.create_collection(
-                name=self._collection_name,
-                metadata={"hnsw:space": "cosine"},
-            )
-
             row_by_name: dict[str, dict[str, Any]] = {
                 str(r.get("name", "")): r for r in catalog_rows
             }
@@ -91,6 +94,21 @@ class LayerVectorStore:
                 self._last_indexed_at = datetime.now(UTC)
                 return
 
+            content_hash = _compute_content_hash(documents)
+            if self._indexed and self._last_content_hash == content_hash:
+                logger.info("Catalog unchanged (hash %s), skipping re-index", content_hash[:12])
+                return
+
+            # Start fresh: delete then create
+            try:
+                self._client.delete_collection(self._collection_name)
+            except Exception:
+                pass
+            self._collection = self._client.create_collection(
+                name=self._collection_name,
+                metadata={"hnsw:space": "cosine"},
+            )
+
             embeddings = await embed_fn(documents)
 
             self._collection.add(
@@ -101,6 +119,7 @@ class LayerVectorStore:
             )
             self._indexed = True
             self._last_indexed_at = datetime.now(UTC)
+            self._last_content_hash = content_hash
             logger.info("Indexed %d layers into vector store", len(ids))
 
     def search(self, query_embedding: list[float], top_k: int = 8) -> list[dict[str, Any]]:
@@ -158,6 +177,7 @@ class LayerVectorStore:
             self._collection = None
         self._indexed = False
         self._last_indexed_at = None
+        self._last_content_hash = None
 
 
 _store: LayerVectorStore | None = None

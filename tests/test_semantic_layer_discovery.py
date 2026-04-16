@@ -70,6 +70,9 @@ def test_layer_discoverer_uses_semantic_search_when_indexed(monkeypatch) -> None
     monkeypatch.setattr("app.graph.nodes.ainvoke_llm", fake_ainvoke_llm)
     monkeypatch.setattr("app.graph.nodes.get_embeddings", fake_get_embeddings)
     monkeypatch.setattr("app.graph.nodes.get_layer_vector_store", lambda: store)
+    monkeypatch.setenv("LAYER_DISCOVERY_MODE", "semantic")
+    from app.core.settings import get_settings
+    get_settings.cache_clear()
 
     state: dict[str, Any] = {
         "user_query": "show me flood risk areas",
@@ -113,6 +116,9 @@ def test_layer_discoverer_returns_error_when_semantic_index_unavailable(monkeypa
     monkeypatch.setattr("app.graph.nodes.ainvoke_llm", fake_ainvoke_llm)
     monkeypatch.setattr("app.graph.nodes.get_embeddings", failing_embeddings)
     monkeypatch.setattr("app.graph.nodes.get_layer_vector_store", lambda: store)
+    monkeypatch.setenv("LAYER_DISCOVERY_MODE", "semantic")
+    from app.core.settings import get_settings
+    get_settings.cache_clear()
 
     state: dict[str, Any] = {
         "user_query": "show states",

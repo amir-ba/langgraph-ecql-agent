@@ -185,3 +185,87 @@ def test_vector_store_semantic_match_no_keyword_overlap() -> None:
     # inundation layer should be the top result despite no keyword "flood" in layer name
     assert results[0]["layer_name"] == "env:inundation_poly_2025_v3"
     assert results[0]["score"] > 0.9  # high cosine similarity
+
+
+def test_vector_store_skips_reindex_when_content_unchanged() -> None:
+    """index_layers with identical data a second time must skip the embed call."""
+    store = LayerVectorStore()
+    layers = [
+        _make_layer("city:hospitals", "Krankenhäuser", "Gesundheitsversorgung"),
+        _make_layer("city:schools", "Schulen", "Bildungseinrichtungen"),
+    ]
+    catalog_rows = [
+        _make_catalog_row("city:hospitals", "Krankenhäuser", "Hospitals", "Gesundheitsversorgung", "Healthcare"),
+        _make_catalog_row("city:schools", "Schulen", "Schools", "Bildungseinrichtungen", "Education"),
+    ]
+
+    call_count = 0
+
+    async def counting_embed(texts: list[str], **kwargs) -> list[list[float]]:
+        nonlocal call_count
+        call_count += 1
+        return [[0.0] * 64 for _ in texts]
+
+    asyncio.run(store.index_layers(layers, catalog_rows, counting_embed))
+    assert call_count == 1
+    assert store.layer_count() == 2
+
+    # Second call with same data — embed_fn must NOT be called again
+    asyncio.run(store.index_layers(layers, catalog_rows, counting_embed))
+    assert call_count == 1  # still 1
+    assert store.layer_count() == 2
+
+
+def test_vector_store_reindexes_when_content_changes() -> None:
+    """index_layers must re-embed when the catalog content changes."""
+    store = LayerVectorStore()
+    layers_v1 = [_make_layer("city:hospitals", "Krankenhäuser", "Gesundheitsversorgung")]
+    rows_v1 = [_make_catalog_row("city:hospitals", "Krankenhäuser", "Hospitals", "Gesundheitsversorgung", "Healthcare")]
+
+    layers_v2 = [
+        _make_layer("city:hospitals", "Krankenhäuser", "Gesundheitsversorgung"),
+        _make_layer("city:schools", "Schulen", "Bildungseinrichtungen"),
+    ]
+    rows_v2 = [
+        _make_catalog_row("city:hospitals", "Krankenhäuser", "Hospitals", "Gesundheitsversorgung", "Healthcare"),
+        _make_catalog_row("city:schools", "Schulen", "Schools", "Bildungseinrichtungen", "Education"),
+    ]
+
+    call_count = 0
+
+    async def counting_embed(texts: list[str], **kwargs) -> list[list[float]]:
+        nonlocal call_count
+        call_count += 1
+        return [[0.0] * 64 for _ in texts]
+
+    asyncio.run(store.index_layers(layers_v1, rows_v1, counting_embed))
+    assert call_count == 1
+    assert store.layer_count() == 1
+
+    # Content changed — must re-embed
+    asyncio.run(store.index_layers(layers_v2, rows_v2, counting_embed))
+    assert call_count == 2
+    assert store.layer_count() == 2
+
+
+def test_vector_store_reindexes_after_clear() -> None:
+    """After clear(), the same content must trigger a fresh embed call."""
+    store = LayerVectorStore()
+    layers = [_make_layer("city:roads", "Strassen", "Strassennetz")]
+    rows = [_make_catalog_row("city:roads", "Strassen", "Roads", "Strassennetz", "Road network")]
+
+    call_count = 0
+
+    async def counting_embed(texts: list[str], **kwargs) -> list[list[float]]:
+        nonlocal call_count
+        call_count += 1
+        return [[0.0] * 64 for _ in texts]
+
+    asyncio.run(store.index_layers(layers, rows, counting_embed))
+    assert call_count == 1
+
+    store.clear()
+
+    # Same content but index was cleared — must re-embed
+    asyncio.run(store.index_layers(layers, rows, counting_embed))
+    assert call_count == 2

@@ -220,3 +220,85 @@ def test_geocoder_context_node_skips_self_referential_spatial_reference(monkeypa
     assert len(filtered_predicates) == 1
     assert filtered_predicates[0]["id"] == "p1"
     assert filtered_predicates[0]["target_ids"] == ["g1"]
+
+
+def test_geocoder_context_node_skips_verbose_self_referential_target(monkeypatch):
+    """A spatial_reference whose value *contains* the layer_subject with extra description
+    (e.g. 'Neubaugebiete (new development areas) near Hamburg') must still be detected
+    as self-referential and silently skipped.
+    """
+
+    class _FailingGeocoder:
+        async def forward_fulltext(self, query: str, max_results: int, epsg: int):
+            raise AssertionError("forward_fulltext should not be called for the layer subject")
+
+        async def suggest(self, query: str, max_results: int = 1):
+            raise AssertionError("suggest should not be called for the layer subject")
+
+    monkeypatch.setattr("app.graph.nodes.GeocoderClient", lambda **kwargs: _FailingGeocoder())
+
+    state = {
+        "layer_subject": "neubaugebiete",
+        "spatial_targets": [
+            {
+                "id": "g2",
+                "kind": "spatial_reference",
+                "value": "Neubaugebiete (new development areas) near Hamburg, Germany",
+                "role": "primary_area",
+                "required": False,
+            },
+        ],
+        "spatial_predicates": [],
+    }
+
+    updates = asyncio.run(geocoder_context_node(state))
+    assert updates.get("validation_error") is None
+    contexts = updates.get("spatial_contexts", [])
+    assert len(contexts) == 0  # self-referential target was skipped
+
+
+def test_geocoder_context_node_cleans_up_reference_value(monkeypatch):
+    """Parenthetical descriptions and ', Germany' suffixes should be stripped
+    from the value before calling the geocoder suggest/forward_fulltext endpoints.
+    """
+
+    received_queries = []
+
+    class _TrackingGeocoder:
+        async def suggest(self, query: str, max_results: int = 1):
+            received_queries.append(("suggest", query))
+            return {
+                "SuggestResult": [
+                    {"id": "1", "locationType": "City", "label": query, "score": 1.0}
+                ]
+            }
+
+        async def forward_fulltext(self, query: str, max_results: int, epsg: int):
+            received_queries.append(("forward_fulltext", query))
+            return {
+                "Result": [{"Coordinate": "53.551086,9.993682"}]
+            }
+
+    monkeypatch.setattr("app.graph.nodes.GeocoderClient", lambda **kwargs: _TrackingGeocoder())
+
+    state = {
+        "spatial_targets": [
+            {
+                "id": "g1",
+                "kind": "spatial_reference",
+                "value": "Hamburg, Germany",
+                "role": "proximity_anchor",
+                "required": True,
+            },
+        ],
+        "spatial_predicates": [],
+    }
+
+    updates = asyncio.run(geocoder_context_node(state))
+    assert updates.get("validation_error") is None
+    contexts = updates.get("spatial_contexts", [])
+    assert len(contexts) == 1
+
+    # Verify the geocoder received the cleaned-up query, not the verbose one
+    for call_type, query in received_queries:
+        assert query == "Hamburg", f"{call_type} received '{query}', expected 'Hamburg'"
